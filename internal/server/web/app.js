@@ -154,8 +154,9 @@ function renderSidebar() {
     h("div", { class: "nav-section" }, "Projects"),
     h("div", { class: "nav" },
       S.overview.projects.map(p => {
-        const active = (p.counts.in_progress || 0) + (p.counts.review || 0);
-        return link(`/p/${p.slug}`, p.name, h("span", { class: "count" }, active ? `${active} active` : (p.counts.todo || "")));
+        const c = p.counts || {};
+        const active = (c.in_progress || 0) + (c.review || 0);
+        return link(`/p/${p.slug}`, p.name, h("span", { class: "count" }, active ? `${active} active` : (c.todo || "")));
       }),
       h("a", { href: "#", onclick: e => { e.preventDefault(); newProjectModal(); } }, "+ New project")),
     h("div", { class: "sidebar-foot" }, `v${S.overview.version || ""} · spent ${money(S.overview.total_cost_usd)}`),
@@ -515,9 +516,9 @@ async function openIssue(slug, number, fromRoute) {
         h("div", { class: "k" }, "Branch"), h("div", { class: "mono hint" }, i.branch || `issue-${i.number} (when started)`),
         h("div", { class: "k" }, "Created"), h("div", { class: "hint" }, `${ago(i.created_at)} by ${i.created_by}`)),
       desc,
-      i.runs.length ? [h("div", { class: "section-title" }, "Agent runs"), runTable(i.runs.slice(0, 8), false)] : null,
+      i.runs?.length ? [h("div", { class: "section-title" }, "Agent runs"), runTable(i.runs.slice(0, 8), false)] : null,
       h("div", { class: "section-title" }, "Activity"),
-      i.comments.map(c => {
+      (i.comments || []).map(c => {
         const sys = c.author === "multiclaude" || (c.body.startsWith("moved ") && c.body.length < 40) || c.body.startsWith("🤖");
         return h("div", { class: "comment" + (sys && c.body.length < 200 ? " system" : "") },
           h("div", { class: "who" }, h("b", null, c.author === "human" ? "You" : c.author), h("span", null, ago(c.created_at))),

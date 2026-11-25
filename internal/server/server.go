@@ -36,6 +36,17 @@ type Server struct {
 }
 
 func New(dataDir, addr, downloadDir string) (*Server, error) {
+	// Must be absolute: git http-backend runs as CGI with its working directory
+	// set to git's own directory, so a relative GIT_PROJECT_ROOT would not resolve.
+	dataDir, err := filepath.Abs(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if downloadDir != "" {
+		if downloadDir, err = filepath.Abs(downloadDir); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.MkdirAll(filepath.Join(dataDir, "repos"), 0o755); err != nil {
 		return nil, err
 	}

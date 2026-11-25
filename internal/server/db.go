@@ -169,7 +169,7 @@ type Project struct {
 	Instructions  string         `json:"instructions"`
 	Dispatch      bool           `json:"dispatch"`
 	CreatedAt     int64          `json:"created_at"`
-	Counts        map[string]int `json:"counts,omitempty"`
+	Counts        map[string]int `json:"counts"`
 }
 
 const projectCols = `id,slug,name,description,default_branch,review_mode,instructions,dispatch,created_at`
@@ -199,8 +199,8 @@ type Issue struct {
 	CreatedAt int64     `json:"created_at"`
 	UpdatedAt int64     `json:"updated_at"`
 	Sort      float64   `json:"sort"`
-	Comments  []Comment `json:"comments,omitempty"`
-	Runs      []Run     `json:"runs,omitempty"`
+	Comments  []Comment `json:"comments"`
+	Runs      []Run     `json:"runs"`
 }
 
 const issueCols = `id,project_id,number,title,body,status,priority,labels,requires,depends_on,assignee,run_id,attempts,branch,created_by,created_at,updated_at,sort`
