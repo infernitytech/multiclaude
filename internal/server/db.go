@@ -160,15 +160,15 @@ func parseInts(s string) []int {
 // ---- model types -------------------------------------------------------
 
 type Project struct {
-	ID            int64  `json:"id"`
-	Slug          string `json:"slug"`
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	DefaultBranch string `json:"default_branch"`
-	ReviewMode    string `json:"review_mode"` // agent | human | none
-	Instructions  string `json:"instructions"`
-	Dispatch      bool   `json:"dispatch"`
-	CreatedAt     int64  `json:"created_at"`
+	ID            int64          `json:"id"`
+	Slug          string         `json:"slug"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	DefaultBranch string         `json:"default_branch"`
+	ReviewMode    string         `json:"review_mode"` // agent | human | none
+	Instructions  string         `json:"instructions"`
+	Dispatch      bool           `json:"dispatch"`
+	CreatedAt     int64          `json:"created_at"`
 	Counts        map[string]int `json:"counts,omitempty"`
 }
 
@@ -181,24 +181,24 @@ func scanProject(r interface{ Scan(...any) error }) (*Project, error) {
 }
 
 type Issue struct {
-	ID        int64    `json:"id"`
-	ProjectID int64    `json:"project_id"`
-	Number    int      `json:"number"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body"`
-	Status    string   `json:"status"`
-	Priority  int      `json:"priority"`
-	Labels    []string `json:"labels"`
-	Requires  []string `json:"requires"`
-	DependsOn []int    `json:"depends_on"`
-	Assignee  string   `json:"assignee"`
-	RunID     string   `json:"run_id"`
-	Attempts  int      `json:"attempts"`
-	Branch    string   `json:"branch"`
-	CreatedBy string   `json:"created_by"`
-	CreatedAt int64    `json:"created_at"`
-	UpdatedAt int64    `json:"updated_at"`
-	Sort      float64  `json:"sort"`
+	ID        int64     `json:"id"`
+	ProjectID int64     `json:"project_id"`
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Status    string    `json:"status"`
+	Priority  int       `json:"priority"`
+	Labels    []string  `json:"labels"`
+	Requires  []string  `json:"requires"`
+	DependsOn []int     `json:"depends_on"`
+	Assignee  string    `json:"assignee"`
+	RunID     string    `json:"run_id"`
+	Attempts  int       `json:"attempts"`
+	Branch    string    `json:"branch"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt int64     `json:"created_at"`
+	UpdatedAt int64     `json:"updated_at"`
+	Sort      float64   `json:"sort"`
 	Comments  []Comment `json:"comments,omitempty"`
 	Runs      []Run     `json:"runs,omitempty"`
 }
@@ -225,10 +225,10 @@ type Node struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
 	Hardware      json.RawMessage `json:"hardware"`
-	Caps          []string        `json:"caps"`       // reported by runner
-	Roles         []string        `json:"roles"`      // effective
+	Caps          []string        `json:"caps"`  // reported by runner
+	Roles         []string        `json:"roles"` // effective
 	ReportedRoles []string        `json:"reported_roles"`
-	MaxConc       int             `json:"max_conc"`   // effective
+	MaxConc       int             `json:"max_conc"` // effective
 	ReportedConc  int             `json:"reported_conc"`
 	ExtraCaps     []string        `json:"extra_caps"` // added in UI
 	OverrideRoles string          `json:"-"`
