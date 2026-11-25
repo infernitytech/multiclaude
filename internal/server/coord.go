@@ -508,6 +508,7 @@ func (s *Server) deliverChat(p *Project, targets []*Node, author, body string) s
 // ---- finishing runs ------------------------------------------------------------------
 
 func (s *Server) finishRun(id string, fin proto.RunFinish) {
+	defer forgetAgentMsgBudget(id)
 	run, err := s.runByID(id)
 	if err != nil || run.Status != "running" {
 		return

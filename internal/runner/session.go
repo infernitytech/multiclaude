@@ -124,6 +124,17 @@ func (s *session) git(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// environmentPrompt adds the facts only the runner knows to the system prompt.
+func (s *session) environmentPrompt() string {
+	return fmt.Sprintf(`
+Environment:
+- Git remote (origin): %s
+- Local checkout (your working directory): %s
+- MultiClaude server: %s (board: %s/p/%s)
+- Current branch: %s
+`, s.r.cfg.Server+s.a.RepoURL, s.dir, s.r.cfg.Server, s.r.cfg.Server, s.a.ProjectSlug, s.a.Branch)
+}
+
 func hasLFS() bool { _, err := exec.LookPath("git-lfs"); return err == nil }
 
 func (s *session) prepare() error {
@@ -345,7 +356,7 @@ func (s *session) runClaude(messages []string) error {
 	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", s.r.cfg.PermissionMode,
 		"--mcp-config", mcpPath,
-		"--append-system-prompt", s.a.SystemPrompt}
+		"--append-system-prompt", s.a.SystemPrompt + s.environmentPrompt()}
 	if s.sessionID != "" {
 		args = append(args, "--resume", s.sessionID)
 	}

@@ -155,10 +155,10 @@ var Tools = []Tool{
 		obj(map[string]any{"reason": str}, "reason")},
 	{"review_verdict", "Reviewers only: approve (branch gets merged into the base branch) or request changes (issue goes back to the queue with your comment).",
 		obj(map[string]any{"verdict": desc(str, "approve | request_changes"), "comment": str}, "verdict", "comment")},
-	{"post_chat", "Post a message to the project chat that humans and other agents see. 'to' may be a machine name to direct it at that machine's agents; omit to broadcast.",
-		obj(map[string]any{"message": str, "to": str}, "message")},
+	{"post_chat", "Send a message to other agents and the humans. It is stored in the project chat and delivered live into the recipients' running sessions. Omit 'to' to reach every running agent on the project.",
+		obj(map[string]any{"message": str, "to": desc(str, "Optional recipient: an agent id from list_agents (e.g. \"machine/abc123\"), or a machine name for all its agents on this project. Omit to broadcast.")}, "message")},
 	{"read_chat", "Read recent project chat messages (instructions from humans, notes from other agents).",
 		obj(map[string]any{"limit": num})},
-	{"list_agents", "List machines in the swarm with their hardware, capabilities, roles and what they are working on right now.",
+	{"list_agents", "List machines in the swarm (hardware, capabilities, roles) and the running agents with their agent ids and what each is working on right now.",
 		obj(map[string]any{})},
 }

@@ -164,23 +164,7 @@ func (s *Server) dispatchTool(c proto.AgentCall) (string, error) {
 		return "Verdict recorded. Push any final commits and end your session; the server acts on the verdict when the session ends.", nil
 
 	case "post_chat":
-		target := ""
-		msg := str("message")
-		if to := str("to"); to != "" {
-			n, err := s.nodeByName(to)
-			if err != nil {
-				return "", fmt.Errorf("unknown machine %q (see list_agents)", to)
-			}
-			target = n.ID
-			s.postMessage(p.ID, me, target, msg)
-			if n.ID != run.NodeID {
-				note := s.deliverChat(p, []*Node{n}, me, msg)
-				return "Posted. " + note, nil
-			}
-			return "Posted.", nil
-		}
-		s.postMessage(p.ID, me, "", msg)
-		return "Posted to the project chat.", nil
+		return s.postChatFromAgent(p, run, str("to"), str("message"))
 
 	case "read_chat":
 		limit := intv("limit")
@@ -217,13 +201,14 @@ func (s *Server) dispatchTool(c proto.AgentCall) (string, error) {
 			fmt.Fprintf(&b, "%s (%s) — %s; caps: %s; roles: %s; slots %d/%d\n", n.Name, state, hwSummary(n),
 				strings.Join(n.AllCaps(), ","), strings.Join(n.Roles, ","), len(n.Active), n.MaxConc)
 			for _, r := range n.Active {
-				if r.IssueNumber > 0 {
-					fmt.Fprintf(&b, "   • %s #%d %s (%s)\n", r.Kind, r.IssueNumber, r.IssueTitle, r.ProjectSlug)
-				} else {
-					fmt.Fprintf(&b, "   • %s (%s)\n", r.Kind, r.ProjectSlug)
+				you := ""
+				if r.ID == run.ID {
+					you = " (you)"
 				}
+				fmt.Fprintf(&b, "   • agent %s%s — %s [project %s]\n", agentHandle(n.Name, r.ID), you, r.activity(), r.ProjectSlug)
 			}
 		}
+		b.WriteString("\nMessage an agent with post_chat to=\"<agent>\" (e.g. machine/abc123), all agents of a machine with to=\"<machine>\", or every agent on this project by omitting \"to\".\n")
 		return b.String(), nil
 	}
 	return "", fmt.Errorf("unknown tool %q", c.Tool)
