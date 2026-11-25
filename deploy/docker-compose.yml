@@ -1,0 +1,15 @@
+# TrueNAS SCALE: Apps → Discover Apps → ⋮ → "Install via YAML", paste this file.
+# 1. Create a dataset, e.g. /mnt/tank/apps/multiclaude, owned by user "apps" (568).
+# 2. Adjust the host path and the image name below.
+services:
+  multiclaude:
+    image: ghcr.io/YOUR_GITHUB_USER/multiclaude:latest   # or "multiclaude:latest" if you loaded the image manually
+    container_name: multiclaude
+    restart: unless-stopped
+    user: "568:568"
+    ports:
+      - "8080:8080"
+    volumes:
+      - /mnt/tank/apps/multiclaude:/data
+    environment:
+      TZ: Europe/Berlin

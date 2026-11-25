@@ -1,0 +1,274 @@
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"multiclaude/internal/proto"
+)
+
+// agentCall handles MCP tool calls coming from Claude sessions (via the runner's MCP bridge).
+func (s *Server) agentCall(w http.ResponseWriter, r *http.Request) {
+	var c proto.AgentCall
+	if err := readJSON(r, &c); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	text, err := s.dispatchTool(c)
+	if err != nil {
+		writeJSON(w, proto.AgentResult{Text: err.Error(), IsError: true})
+		return
+	}
+	writeJSON(w, proto.AgentResult{Text: text})
+}
+
+func (s *Server) dispatchTool(c proto.AgentCall) (string, error) {
+	run, err := s.runByID(c.RunID)
+	if err != nil {
+		return "", fmt.Errorf("unknown run %q", c.RunID)
+	}
+	p, err := s.projectByID(run.ProjectID)
+	if err != nil {
+		return "", err
+	}
+	me := run.NodeName
+	var args map[string]json.RawMessage
+	if len(c.Args) > 0 {
+		json.Unmarshal(c.Args, &args)
+	}
+	str := func(k string) string {
+		var v string
+		json.Unmarshal(args[k], &v)
+		return v
+	}
+	intv := func(k string) int {
+		var v int
+		json.Unmarshal(args[k], &v)
+		return v
+	}
+	ownIssue := func() (*Issue, error) {
+		if run.IssueID == nil {
+			return nil, fmt.Errorf("this session has no assigned issue")
+		}
+		return s.issueByID(*run.IssueID)
+	}
+
+	switch c.Tool {
+	case "list_issues":
+		issues, err := s.listIssues(p.ID, str("status"), str("query"))
+		if err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		for _, i := range issues {
+			fmt.Fprintf(&b, "#%d [%s] (%s) %s", i.Number, i.Status, priorityNames[clampPrio(i.Priority)], i.Title)
+			if i.Assignee != "" && (i.Status == "in_progress" || i.Status == "review") {
+				fmt.Fprintf(&b, " — %s", i.Assignee)
+			}
+			if len(i.Requires) > 0 {
+				fmt.Fprintf(&b, " requires:%s", strings.Join(i.Requires, ","))
+			}
+			if len(i.DependsOn) > 0 {
+				fmt.Fprintf(&b, " depends_on:%v", i.DependsOn)
+			}
+			b.WriteString("\n")
+		}
+		if b.Len() == 0 {
+			return "No issues match.", nil
+		}
+		return b.String(), nil
+
+	case "get_issue":
+		i, err := s.issueByNumber(p.ID, intv("number"))
+		if err != nil {
+			return "", fmt.Errorf("issue #%d not found", intv("number"))
+		}
+		return fmt.Sprintf("Status: %s | Branch: %s | Assignee: %s\n%s", i.Status, i.Branch, i.Assignee, s.issueContext(i)), nil
+
+	case "create_issue":
+		var in issueInput
+		json.Unmarshal(c.Args, &in)
+		i, err := s.createIssue(p, in, me)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Created issue #%d (%s).", i.Number, i.Status), nil
+
+	case "update_issue":
+		i, err := s.issueByNumber(p.ID, intv("number"))
+		if err != nil {
+			return "", fmt.Errorf("issue #%d not found", intv("number"))
+		}
+		var in issueInput
+		json.Unmarshal(c.Args, &in)
+		if in.Status != nil && i.RunID == run.ID {
+			return "", fmt.Errorf("use complete_work / block_issue / review_verdict to change the status of your own assignment")
+		}
+		if _, err := s.updateIssue(p, i, in, me); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Updated #%d.", i.Number), nil
+
+	case "comment_issue":
+		i, err := s.issueByNumber(p.ID, intv("number"))
+		if err != nil {
+			return "", fmt.Errorf("issue #%d not found", intv("number"))
+		}
+		s.addComment(i.ID, me, str("body"))
+		s.issueChanged(p.ID)
+		return "Comment added.", nil
+
+	case "complete_work":
+		i, err := ownIssue()
+		if err != nil || run.Kind != "work" {
+			return "", fmt.Errorf("complete_work is only for work assignments")
+		}
+		s.db.Exec(`UPDATE runs SET completed=1 WHERE id=?`, run.ID)
+		s.addComment(i.ID, me, "✔️ Work completed:\n\n"+str("summary"))
+		s.issueChanged(p.ID)
+		return "Recorded. Make sure all commits are pushed to origin/" + i.Branch + ", then end your session (the runner also pushes leftovers).", nil
+
+	case "block_issue":
+		i, err := ownIssue()
+		if err != nil {
+			return "", err
+		}
+		s.db.Exec(`UPDATE issues SET status='blocked', run_id='', updated_at=? WHERE id=?`, now(), i.ID)
+		s.addComment(i.ID, me, "🚧 Blocked: "+str("reason"))
+		s.postMessage(p.ID, me, "", fmt.Sprintf("🚧 #%d %s is blocked: %s", i.Number, i.Title, str("reason")))
+		s.issueChanged(p.ID)
+		return "Issue marked as blocked; a human will look at it. End your session now.", nil
+
+	case "review_verdict":
+		i, err := ownIssue()
+		if err != nil || run.Kind != "review" {
+			return "", fmt.Errorf("review_verdict is only for review assignments")
+		}
+		v := str("verdict")
+		if v != "approve" && v != "request_changes" {
+			return "", fmt.Errorf(`verdict must be "approve" or "request_changes"`)
+		}
+		s.db.Exec(`UPDATE runs SET verdict=? WHERE id=?`, v, run.ID)
+		icon := "👍 Approved"
+		if v == "request_changes" {
+			icon = "🔁 Changes requested"
+		}
+		if c := strings.TrimSpace(str("comment")); c != "" {
+			icon += ":\n\n" + c
+		}
+		s.addComment(i.ID, me, icon)
+		s.issueChanged(p.ID)
+		return "Verdict recorded. Push any final commits and end your session; the server acts on the verdict when the session ends.", nil
+
+	case "post_chat":
+		target := ""
+		msg := str("message")
+		if to := str("to"); to != "" {
+			n, err := s.nodeByName(to)
+			if err != nil {
+				return "", fmt.Errorf("unknown machine %q (see list_agents)", to)
+			}
+			target = n.ID
+			s.postMessage(p.ID, me, target, msg)
+			if n.ID != run.NodeID {
+				note := s.deliverChat(p, []*Node{n}, me, msg)
+				return "Posted. " + note, nil
+			}
+			return "Posted.", nil
+		}
+		s.postMessage(p.ID, me, "", msg)
+		return "Posted to the project chat.", nil
+
+	case "read_chat":
+		limit := intv("limit")
+		if limit <= 0 || limit > 200 {
+			limit = 30
+		}
+		msgs, _ := s.messages(p.ID, limit)
+		var b strings.Builder
+		for _, m := range msgs {
+			to := ""
+			if m.Target != "" && !strings.HasPrefix(m.Target, "reply:") {
+				if n, err := s.node(m.Target); err == nil {
+					to = " → " + n.Name
+				}
+			}
+			fmt.Fprintf(&b, "[%s] %s%s: %s\n", time.UnixMilli(m.CreatedAt).Format("01-02 15:04"), m.Author, to, m.Body)
+		}
+		if b.Len() == 0 {
+			return "The chat is empty.", nil
+		}
+		return b.String(), nil
+
+	case "list_agents":
+		nodes, _ := s.listNodes()
+		var b strings.Builder
+		for _, n := range nodes {
+			state := "offline"
+			if n.Online {
+				state = "online"
+			}
+			if n.Paused {
+				state += ", paused"
+			}
+			fmt.Fprintf(&b, "%s (%s) — %s; caps: %s; roles: %s; slots %d/%d\n", n.Name, state, hwSummary(n),
+				strings.Join(n.AllCaps(), ","), strings.Join(n.Roles, ","), len(n.Active), n.MaxConc)
+			for _, r := range n.Active {
+				if r.IssueNumber > 0 {
+					fmt.Fprintf(&b, "   • %s #%d %s (%s)\n", r.Kind, r.IssueNumber, r.IssueTitle, r.ProjectSlug)
+				} else {
+					fmt.Fprintf(&b, "   • %s (%s)\n", r.Kind, r.ProjectSlug)
+				}
+			}
+		}
+		return b.String(), nil
+	}
+	return "", fmt.Errorf("unknown tool %q", c.Tool)
+}
+
+func (s *Server) messages(pid int64, limit int) ([]Message, error) {
+	rows, err := s.db.Query(`SELECT id,project_id,author,target,body,created_at FROM (SELECT * FROM messages WHERE project_id=? ORDER BY id DESC LIMIT ?) ORDER BY id`, pid, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		var m Message
+		rows.Scan(&m.ID, &m.ProjectID, &m.Author, &m.Target, &m.Body, &m.CreatedAt)
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+func (s *Server) listNodes() ([]*Node, error) {
+	rows, err := s.db.Query(`SELECT ` + nodeCols + ` FROM nodes ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	var nodes []*Node
+	for rows.Next() {
+		if n, err := scanNode(rows); err == nil {
+			nodes = append(nodes, n)
+		}
+	}
+	rows.Close()
+	for _, n := range nodes {
+		n.Projects = s.nodeProjects(n.ID)
+		n.Active = []Run{}
+		rr, err := s.db.Query(runSelect+`WHERE r.node_id=? AND r.status='running' ORDER BY r.started_at`, n.ID)
+		if err == nil {
+			for rr.Next() {
+				if r, err := scanRun(rr); err == nil {
+					r.Prompt = ""
+					n.Active = append(n.Active, *r)
+				}
+			}
+			rr.Close()
+		}
+	}
+	return nodes, nil
+}
