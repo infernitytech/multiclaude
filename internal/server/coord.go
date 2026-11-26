@@ -106,9 +106,13 @@ func (s *Server) runnerRegister(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	if req.NodeID == "" {
-		req.NodeID = newID()
+	nodeID, newTok, err := s.enroll(r, req.NodeID, req.JoinToken)
+	if err != nil {
+		s.logf("auth: refused runner registration from %s (%s): %v", clientIP(r), req.Name, err)
+		unauthorized(w, err.Error())
+		return
 	}
+	req.NodeID = nodeID
 	if req.Name == "" {
 		req.Name = req.Hardware.Hostname
 	}
@@ -119,7 +123,7 @@ func (s *Server) runnerRegister(w http.ResponseWriter, r *http.Request) {
 		req.Roles = []string{"worker", "reviewer"}
 	}
 	t := now()
-	_, err := s.db.Exec(`INSERT INTO nodes(id,name,hardware,caps,roles,max_conc,claude_path,claude_version,claude_auth,runner_version,last_seen,registered_at)
+	_, err = s.db.Exec(`INSERT INTO nodes(id,name,hardware,caps,roles,max_conc,claude_path,claude_version,claude_auth,runner_version,last_seen,registered_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, hardware=excluded.hardware, caps=excluded.caps, roles=excluded.roles,
 		max_conc=excluded.max_conc, claude_path=excluded.claude_path, claude_version=excluded.claude_version, claude_auth=excluded.claude_auth,
@@ -129,6 +133,10 @@ func (s *Server) runnerRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
+	}
+	if newTok != "" {
+		s.db.Exec(`UPDATE nodes SET token_hash=? WHERE id=?`, tokenHash(newTok), req.NodeID)
+		s.logf("auth: enrolled machine %s (%s) from %s", req.Name, req.NodeID, clientIP(r))
 	}
 	// A (re)starting runner has no active runs: release whatever it held.
 	rows, _ := s.db.Query(`SELECT id FROM runs WHERE node_id=? AND status='running'`, req.NodeID)
@@ -147,7 +155,7 @@ func (s *Server) runnerRegister(w http.ResponseWriter, r *http.Request) {
 	s.drain(req.NodeID)
 	s.emit(event{Type: "nodes"})
 	s.logf("node registered: %s (%s) caps=%v roles=%v", req.Name, req.NodeID, req.Capabilities, req.Roles)
-	writeJSON(w, proto.RegisterResponse{NodeID: req.NodeID})
+	writeJSON(w, proto.RegisterResponse{NodeID: req.NodeID, NodeToken: newTok})
 }
 
 func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +164,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	req.NodeID = nodeFrom(r) // a machine can only poll for itself
 	n, err := s.node(req.NodeID)
 	if err != nil {
 		httpErr(w, 404, "unknown node, re-register")
@@ -238,7 +247,7 @@ func (s *Server) runnerEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, err := s.runByID(id)
-	if err != nil {
+	if err != nil || run.NodeID != nodeFrom(r) {
 		httpErr(w, 404, "unknown run")
 		return
 	}
@@ -257,6 +266,7 @@ func (s *Server) runnerEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		s.emit(event{Type: "run_event", RunID: id, ProjectID: run.ProjectID,
 			Data: map[string]any{"id": eid, "ts": t, "type": e.Type, "data": json.RawMessage(e.Data)}})
+		s.trackActivity(run, e.Type, e.Data)
 
 		var m struct {
 			Type      string  `json:"type"`
@@ -307,6 +317,10 @@ func (s *Server) runnerFinish(w http.ResponseWriter, r *http.Request) {
 	var fin proto.RunFinish
 	if err := readJSON(r, &fin); err != nil {
 		httpErr(w, 400, err.Error())
+		return
+	}
+	if run, err := s.runByID(r.PathValue("id")); err != nil || run.NodeID != nodeFrom(r) {
+		httpErr(w, 404, "unknown run")
 		return
 	}
 	s.finishRun(r.PathValue("id"), fin)
@@ -509,6 +523,7 @@ func (s *Server) deliverChat(p *Project, targets []*Node, author, body string) s
 
 func (s *Server) finishRun(id string, fin proto.RunFinish) {
 	defer forgetAgentMsgBudget(id)
+	defer forgetActivity(id)
 	run, err := s.runByID(id)
 	if err != nil || run.Status != "running" {
 		return

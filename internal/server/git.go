@@ -152,7 +152,7 @@ func (s *Server) importLFS(slug, url string) {
 	}
 	run("lfs", "fetch", "--all", "origin")
 	run("remote", "add", "mc", fmt.Sprintf("http://127.0.0.1%s/git/%s.git", s.listenPort(), slug))
-	run("lfs", "push", "--all", "mc")
+	run("-c", "http.extraHeader=Authorization: Bearer "+s.internalToken, "lfs", "push", "--all", "mc")
 }
 
 // ---- smart HTTP ---------------------------------------------------------

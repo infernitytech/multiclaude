@@ -27,11 +27,21 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 
 const installTmpl = `#!/bin/sh
 # MultiClaude runner installer. Usage:
-#   curl -fsSL __SERVER__/install.sh | sh
-#   curl -fsSL __SERVER__/install.sh | sh -s -- --name gpu-box --roles worker --concurrency 4
+#   curl -fsSL __SERVER__/install.sh | sh -s -- --token <join token>
+#   curl -fsSL __SERVER__/install.sh | sh -s -- --token <join token> --name gpu-box --roles worker --concurrency 4
+# The join token is shown in the web UI under Machines → Add a machine. It is
+# only used once to enroll; the machine then gets its own token.
 set -eu
 SERVER="__SERVER__"
-ARGS="$*"
+TOKEN=""
+ARGS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --token) TOKEN="$2"; shift 2 ;;
+    --token=*) TOKEN="${1#--token=}"; shift ;;
+    *) ARGS="$ARGS $1"; shift ;;
+  esac
+done
 
 if [ "$(id -u)" = "0" ]; then
   echo "Please run as the normal user that is logged into Claude Code (not root)." >&2
@@ -52,6 +62,12 @@ mv "$BIN_DIR/multiclaude-runner.tmp" "$BIN_DIR/multiclaude-runner"
 command -v git >/dev/null || echo "WARNING: git is not installed" >&2
 command -v git-lfs >/dev/null || echo "WARNING: git-lfs is not installed (needed for LFS files)" >&2
 
+if [ -n "$TOKEN" ]; then
+  "$BIN_DIR/multiclaude-runner" enroll --server "$SERVER" --token "$TOKEN" $ARGS
+elif [ ! -f "$HOME/.multiclaude/credentials.json" ]; then
+  echo "ERROR: this machine is not enrolled. Re-run with --token <join token> (Machines → Add a machine)." >&2
+  exit 1
+fi
 "$BIN_DIR/multiclaude-runner" doctor --server "$SERVER" $ARGS || true
 
 if [ "$os" = "linux" ] && command -v systemctl >/dev/null; then
@@ -104,6 +120,7 @@ else
 fi
 echo
 echo "Now open $SERVER/machines and assign this machine to projects."
+echo "(To remove it later: delete it on the Machines page — that revokes its token.)"
 `
 
 func (s *Server) installScript(w http.ResponseWriter, r *http.Request) {

@@ -67,7 +67,12 @@ func ServeMCP(server, runID string, in io.Reader, out io.Writer) error {
 			json.Unmarshal(req.Params, &p)
 			b, _ := json.Marshal(proto.AgentCall{RunID: runID, Tool: p.Name, Args: p.Arguments})
 			var res proto.AgentResult
-			resp, err := client.Post(server+"/api/agent/call", "application/json", bytes.NewReader(b))
+			hreq, _ := http.NewRequest("POST", server+"/api/agent/call", bytes.NewReader(b))
+			hreq.Header.Set("Content-Type", "application/json")
+			if tok := os.Getenv("MC_TOKEN"); tok != "" {
+				hreq.Header.Set("Authorization", "Bearer "+tok)
+			}
+			resp, err := client.Do(hreq)
 			if err != nil {
 				res = proto.AgentResult{Text: "MultiClaude server unreachable: " + err.Error(), IsError: true}
 			} else {
@@ -88,5 +93,3 @@ func ServeMCP(server, runID string, in io.Reader, out io.Writer) error {
 	}
 	return sc.Err()
 }
-
-var _ = os.Stdin

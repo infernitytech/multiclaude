@@ -3,6 +3,8 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -43,6 +45,8 @@ CREATE TABLE IF NOT EXISTS issues(
   UNIQUE(project_id, number)
 );
 CREATE INDEX IF NOT EXISTS issues_status ON issues(project_id, status);
+CREATE INDEX IF NOT EXISTS issues_board ON issues(project_id, status, sort, number);
+CREATE INDEX IF NOT EXISTS issues_updated ON issues(project_id, status, updated_at);
 CREATE TABLE IF NOT EXISTS comments(
   id INTEGER PRIMARY KEY,
   issue_id INTEGER NOT NULL,
@@ -126,9 +130,19 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	// A single connection serialises writes and makes claim transactions trivially atomic.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(schema + authSchema); err != nil {
 		return nil, err
 	}
+	// Additive migrations for databases created by older versions.
+	for _, m := range []string{
+		`ALTER TABLE nodes ADD COLUMN disabled_caps TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE nodes ADD COLUMN token_hash TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return nil, fmt.Errorf("migration %q: %w", m, err)
+		}
+	}
+	db.Exec(`CREATE INDEX IF NOT EXISTS nodes_token ON nodes(token_hash)`)
 	return db, nil
 }
 
@@ -230,7 +244,8 @@ type Node struct {
 	ReportedRoles []string        `json:"reported_roles"`
 	MaxConc       int             `json:"max_conc"` // effective
 	ReportedConc  int             `json:"reported_conc"`
-	ExtraCaps     []string        `json:"extra_caps"` // added in UI
+	ExtraCaps     []string        `json:"extra_caps"`    // added in UI
+	DisabledCaps  []string        `json:"disabled_caps"` // switched off in UI (e.g. GPU reserved for something else)
 	OverrideRoles string          `json:"-"`
 	OverrideConc  int             `json:"override_conc"`
 	Paused        bool            `json:"paused"`
@@ -246,7 +261,21 @@ type Node struct {
 	Projects      []int64         `json:"projects"` // assigned project ids
 }
 
-func (n *Node) AllCaps() []string { return append(append([]string{}, n.Caps...), n.ExtraCaps...) }
+// AllCaps are the effective capabilities used for scheduling: detected plus
+// extra tags, minus the ones a human switched off.
+func (n *Node) AllCaps() []string {
+	off := map[string]bool{}
+	for _, c := range n.DisabledCaps {
+		off[strings.ToLower(c)] = true
+	}
+	var out []string
+	for _, c := range append(append([]string{}, n.Caps...), n.ExtraCaps...) {
+		if !off[strings.ToLower(c)] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
 
 func (n *Node) HasRole(r string) bool {
 	for _, x := range n.Roles {
@@ -257,15 +286,15 @@ func (n *Node) HasRole(r string) bool {
 	return false
 }
 
-const nodeCols = `id,name,hardware,caps,roles,max_conc,extra_caps,override_roles,override_conc,paused,claude_path,claude_version,claude_auth,runner_version,model,last_seen,registered_at`
+const nodeCols = `id,name,hardware,caps,roles,max_conc,extra_caps,disabled_caps,override_roles,override_conc,paused,claude_path,claude_version,claude_auth,runner_version,model,last_seen,registered_at`
 
 func scanNode(r interface{ Scan(...any) error }) (*Node, error) {
 	n := &Node{}
-	var hw, caps, roles, extra string
-	err := r.Scan(&n.ID, &n.Name, &hw, &caps, &roles, &n.ReportedConc, &extra, &n.OverrideRoles, &n.OverrideConc, &n.Paused,
+	var hw, caps, roles, extra, disabled string
+	err := r.Scan(&n.ID, &n.Name, &hw, &caps, &roles, &n.ReportedConc, &extra, &disabled, &n.OverrideRoles, &n.OverrideConc, &n.Paused,
 		&n.ClaudePath, &n.ClaudeVersion, &n.ClaudeAuth, &n.RunnerVersion, &n.Model, &n.LastSeen, &n.RegisteredAt)
 	n.Hardware = json.RawMessage(hw)
-	n.Caps, n.ReportedRoles, n.ExtraCaps = parseStrs(caps), parseStrs(roles), parseStrs(extra)
+	n.Caps, n.ReportedRoles, n.ExtraCaps, n.DisabledCaps = parseStrs(caps), parseStrs(roles), parseStrs(extra), nz(parseStrs(disabled))
 	n.Roles = n.ReportedRoles
 	if n.OverrideRoles != "" {
 		n.Roles = parseStrs(n.OverrideRoles)
@@ -279,25 +308,26 @@ func scanNode(r interface{ Scan(...any) error }) (*Node, error) {
 }
 
 type Run struct {
-	ID          string  `json:"id"`
-	ProjectID   int64   `json:"project_id"`
-	IssueID     *int64  `json:"issue_id"`
-	NodeID      string  `json:"node_id"`
-	Kind        string  `json:"kind"`
-	Status      string  `json:"status"`
-	Prompt      string  `json:"prompt,omitempty"`
-	StartedAt   int64   `json:"started_at"`
-	EndedAt     int64   `json:"ended_at"`
-	SessionID   string  `json:"session_id"`
-	CostUSD     float64 `json:"cost_usd"`
-	Result      string  `json:"result"`
-	Error       string  `json:"error"`
-	Completed   bool    `json:"completed"`
-	Verdict     string  `json:"verdict"`
-	NodeName    string  `json:"node_name,omitempty"`
-	IssueNumber int     `json:"issue_number,omitempty"`
-	IssueTitle  string  `json:"issue_title,omitempty"`
-	ProjectSlug string  `json:"project_slug,omitempty"`
+	ID          string    `json:"id"`
+	ProjectID   int64     `json:"project_id"`
+	IssueID     *int64    `json:"issue_id"`
+	NodeID      string    `json:"node_id"`
+	Kind        string    `json:"kind"`
+	Status      string    `json:"status"`
+	Prompt      string    `json:"prompt,omitempty"`
+	StartedAt   int64     `json:"started_at"`
+	EndedAt     int64     `json:"ended_at"`
+	SessionID   string    `json:"session_id"`
+	CostUSD     float64   `json:"cost_usd"`
+	Result      string    `json:"result"`
+	Error       string    `json:"error"`
+	Completed   bool      `json:"completed"`
+	Verdict     string    `json:"verdict"`
+	NodeName    string    `json:"node_name,omitempty"`
+	IssueNumber int       `json:"issue_number,omitempty"`
+	IssueTitle  string    `json:"issue_title,omitempty"`
+	ProjectSlug string    `json:"project_slug,omitempty"`
+	Activity    *Activity `json:"activity,omitempty"` // live, in-memory (running runs only)
 }
 
 const runSelect = `SELECT r.id,r.project_id,r.issue_id,r.node_id,r.kind,r.status,r.prompt,r.started_at,r.ended_at,r.session_id,r.cost_usd,r.result,r.error,r.completed,r.verdict,

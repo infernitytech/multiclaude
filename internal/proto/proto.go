@@ -34,10 +34,14 @@ type RegisterRequest struct {
 	ClaudeVersion  string   `json:"claude_version"`
 	ClaudeAuth     string   `json:"claude_auth"`
 	RunnerVersion  string   `json:"runner_version"`
+	// JoinToken enrolls a new machine; afterwards it authenticates with its node token.
+	JoinToken string `json:"join_token,omitempty"`
 }
 
 type RegisterResponse struct {
 	NodeID string `json:"node_id"`
+	// NodeToken is set only when the machine was just enrolled; the runner stores it.
+	NodeToken string `json:"node_token,omitempty"`
 }
 
 type PollRequest struct {
@@ -131,11 +135,19 @@ func desc(base map[string]any, d string) map[string]any {
 
 // Tools is the coordination toolset every agent gets.
 var Tools = []Tool{
-	{"list_issues", "List issues of the current project. Optional filter by status (backlog,todo,in_progress,review,done,blocked) or text query.",
-		obj(map[string]any{"status": str, "query": str})},
+	{"list_issues", "List issues of the current project (at most 'limit', default 60; the output says when there are more). By default only open (not done) issues. Use filters on big projects.",
+		obj(map[string]any{
+			"status":   desc(str, "open (default) | all | backlog | todo | in_progress | review | blocked | done, or comma-separated"),
+			"query":    desc(str, "text search in title/body/labels, or an issue number"),
+			"label":    str,
+			"requires": desc(str, "only issues requiring this capability"),
+			"order":    desc(str, "board (default) | priority | updated | created | number"),
+			"limit":    num,
+			"offset":   num,
+		})},
 	{"get_issue", "Get one issue with its full description, comments and history.",
 		obj(map[string]any{"number": num}, "number")},
-	{"create_issue", "Create a new issue on the shared board so that some agent (or a human) picks it up. Use for follow-up work you discover, or to split large work into parallel pieces. 'requires' lists capabilities a machine must have (e.g. gpu, cuda, docker). 'depends_on' lists issue numbers that must be done first.",
+	{"create_issue", "Create a new issue on the shared board so that some agent (or a human) picks it up. Use for follow-up work you discover, or to split large work into parallel pieces. 'requires' lists capabilities a machine must have — all of them (e.g. gpu, cuda, docker); only use capabilities listed under \"Hardware routing\" in your instructions, otherwise no machine can take the issue. 'depends_on' lists issue numbers that must be done first.",
 		obj(map[string]any{
 			"title":      str,
 			"body":       desc(str, "Markdown description with enough context for another agent to work on it independently"),
@@ -145,7 +157,7 @@ var Tools = []Tool{
 			"depends_on": nums,
 			"status":     desc(str, "todo (default, immediately claimable) or backlog"),
 		}, "title")},
-	{"update_issue", "Update fields of an issue (title, body, priority, labels, requires, depends_on, status).",
+	{"update_issue", "Update fields of an issue (title, body, priority, labels, requires, depends_on, status). Agents may only change the status of issues nobody is working on, and only between backlog, todo and blocked (e.g. promote backlog → todo).",
 		obj(map[string]any{"number": num, "title": str, "body": str, "priority": str, "labels": strs, "requires": strs, "depends_on": nums, "status": str}, "number")},
 	{"comment_issue", "Add a comment to an issue (progress notes, findings, questions for humans).",
 		obj(map[string]any{"number": num, "body": str}, "number", "body")},

@@ -30,11 +30,20 @@ type Config struct {
 	WorkDir        string
 	PermissionMode string
 	ExtraArgs      []string
+	JoinToken      string // enrolls the machine if it has no credentials yet
+}
+
+// credentials are what a machine keeps after enrolling (WorkDir/credentials.json).
+type credentials struct {
+	Server string `json:"server"`
+	NodeID string `json:"node_id"`
+	Token  string `json:"token"`
 }
 
 type Runner struct {
 	cfg    Config
 	nodeID string
+	token  string // node token (Bearer)
 	http   *http.Client
 	self   string // path of this executable (used as MCP server command)
 
@@ -43,14 +52,34 @@ type Runner struct {
 	wsInUse  map[string]bool
 }
 
+func defaultWorkDir(dir string) string {
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".multiclaude")
+	}
+	return dir
+}
+
+func loadCredentials(workDir string) credentials {
+	var c credentials
+	if b, err := os.ReadFile(filepath.Join(defaultWorkDir(workDir), "credentials.json")); err == nil {
+		json.Unmarshal(b, &c)
+	}
+	return c
+}
+
 func New(cfg Config) (*Runner, error) {
+	cfg.WorkDir = defaultWorkDir(cfg.WorkDir)
+	if abs, err := filepath.Abs(cfg.WorkDir); err == nil {
+		cfg.WorkDir = abs // claude runs in the checkout, so paths must not be relative
+	}
+	creds := loadCredentials(cfg.WorkDir)
+	if cfg.Server == "" {
+		cfg.Server = creds.Server
+	}
 	cfg.Server = strings.TrimRight(cfg.Server, "/")
 	if cfg.Server == "" {
 		return nil, errors.New("--server is required")
-	}
-	if cfg.WorkDir == "" {
-		home, _ := os.UserHomeDir()
-		cfg.WorkDir = filepath.Join(home, ".multiclaude")
 	}
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		return nil, err
@@ -72,14 +101,45 @@ func New(cfg Config) (*Runner, error) {
 	r := &Runner{cfg: cfg, self: self, http: &http.Client{Timeout: 60 * time.Second},
 		sessions: map[string]*session{}, wsInUse: map[string]bool{}}
 	if b, err := os.ReadFile(filepath.Join(cfg.WorkDir, "node-id")); err == nil {
-		r.nodeID = strings.TrimSpace(string(b))
+		r.nodeID = strings.TrimSpace(string(b)) // pre-auth versions
+	}
+	if creds.Token != "" {
+		r.nodeID, r.token = creds.NodeID, creds.Token
 	}
 	return r, nil
 }
 
+func (r *Runner) saveCredentials() error {
+	b, _ := json.MarshalIndent(credentials{Server: r.cfg.Server, NodeID: r.nodeID, Token: r.token}, "", "  ")
+	return os.WriteFile(filepath.Join(r.cfg.WorkDir, "credentials.json"), b, 0o600)
+}
+
+// gitEnv makes git (and git-lfs) send the node token to the MultiClaude server
+// only, without writing it into any repository config.
+func (r *Runner) gitEnv() []string {
+	if r.token == "" {
+		return nil
+	}
+	return []string{"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http." + r.cfg.Server + "/.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Bearer " + r.token}
+}
+
 func (r *Runner) post(path string, in, out any) error {
+	return r.postCtx(context.Background(), path, in, out)
+}
+
+func (r *Runner) postCtx(ctx context.Context, path string, in, out any) error {
 	b, _ := json.Marshal(in)
-	resp, err := r.http.Post(r.cfg.Server+path, "application/json", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, "POST", r.cfg.Server+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
+	}
+	resp, err := r.http.Do(req)
 	if err != nil {
 		return err
 	}
@@ -123,12 +183,32 @@ func (r *Runner) RegisterRequest() proto.RegisterRequest {
 
 func (r *Runner) register() error {
 	req := r.RegisterRequest()
+	if r.token == "" {
+		if r.cfg.JoinToken == "" {
+			return errors.New("this machine is not enrolled yet: run `multiclaude-runner enroll --server URL --token <join token>` (the command is shown under Machines → Add a machine)")
+		}
+		req.JoinToken = r.cfg.JoinToken
+	}
 	var resp proto.RegisterResponse
-	if err := r.post("/api/runner/register", req, &resp); err != nil {
+	err := r.post("/api/runner/register", req, &resp)
+	var he *httpError
+	if errors.As(err, &he) && he.code == 401 && r.token != "" && r.cfg.JoinToken != "" {
+		log.Printf("machine token rejected; enrolling again with the join token")
+		r.token, req.JoinToken = "", r.cfg.JoinToken
+		err = r.post("/api/runner/register", req, &resp)
+	}
+	if err != nil {
 		return err
 	}
 	r.nodeID = resp.NodeID
-	os.WriteFile(filepath.Join(r.cfg.WorkDir, "node-id"), []byte(r.nodeID), 0o644)
+	if resp.NodeToken != "" {
+		r.token = resp.NodeToken
+		if err := r.saveCredentials(); err != nil {
+			return fmt.Errorf("saving credentials: %w", err)
+		}
+		os.Remove(filepath.Join(r.cfg.WorkDir, "node-id"))
+		log.Printf("enrolled with %s; credentials saved to %s", r.cfg.Server, filepath.Join(r.cfg.WorkDir, "credentials.json"))
+	}
 	log.Printf("registered as %q (%s) caps=%v roles=%v claude=%s (%s)", req.Name, r.nodeID, req.Capabilities, req.Roles, req.ClaudeVersion, req.ClaudeAuth)
 	return nil
 }
@@ -169,11 +249,14 @@ func (r *Runner) pollLoop(ctx context.Context) error {
 		}
 		r.mu.Unlock()
 		var resp proto.PollResponse
-		err := r.post("/api/runner/poll", proto.PollRequest{NodeID: r.nodeID, FreeSlots: r.cfg.Concurrency - len(active), ActiveRuns: active}, &resp)
+		err := r.postCtx(ctx, "/api/runner/poll", proto.PollRequest{NodeID: r.nodeID, FreeSlots: r.cfg.Concurrency - len(active), ActiveRuns: active}, &resp)
 		if err != nil {
 			var he *httpError
-			if errors.As(err, &he) && he.code == 404 {
+			if errors.As(err, &he) && (he.code == 404 || he.code == 401) {
 				return err
+			}
+			if ctx.Err() != nil {
+				return nil
 			}
 			fails++
 			if fails%10 == 1 {
@@ -256,6 +339,22 @@ func (r *Runner) releaseWorkspace(dir string) {
 	r.mu.Unlock()
 }
 
+// Enroll registers this machine with a join token and stores its credentials.
+func Enroll(cfg Config) error {
+	if cfg.JoinToken == "" {
+		return errors.New("--token is required (copy it from Machines → Add a machine)")
+	}
+	r, err := New(cfg)
+	if err != nil {
+		return err
+	}
+	if err := r.register(); err != nil {
+		return err
+	}
+	fmt.Printf("Enrolled %s as machine %s. Start it with: multiclaude-runner run\n", r.cfg.Server, r.nodeID)
+	return nil
+}
+
 // Doctor prints what the runner would report.
 func Doctor(cfg Config) {
 	fmt.Println("MultiClaude runner", proto.Version)
@@ -275,11 +374,16 @@ func Doctor(cfg Config) {
 	if os.Geteuid() == 0 && cfg.PermissionMode == "bypassPermissions" {
 		fmt.Println("WARNING: Claude Code refuses bypassPermissions as root; run the runner as a normal user")
 	}
-	resp, err := http.Get(r.cfg.Server + "/api/overview")
+	resp, err := http.Get(r.cfg.Server + "/api/auth")
 	if err != nil {
 		fmt.Println("WARNING: server not reachable:", err)
 		return
 	}
 	resp.Body.Close()
 	fmt.Println("Server reachable:", r.cfg.Server)
+	if r.token == "" {
+		fmt.Println("Not enrolled yet: run `multiclaude-runner enroll --server", r.cfg.Server, "--token <join token>`")
+	} else {
+		fmt.Println("Enrolled as machine", r.nodeID)
+	}
 }

@@ -35,8 +35,9 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `MultiClaude runner %s
 
 Usage:
-  multiclaude-runner run    --server http://nas:8080 [options]   run the daemon
-  multiclaude-runner doctor --server http://nas:8080 [options]   show detected hardware/claude and exit
+  multiclaude-runner enroll --server https://host --token mcj_…  register this machine once (stores credentials)
+  multiclaude-runner run    [--server URL] [options]             run the daemon (server taken from credentials)
+  multiclaude-runner doctor [--server URL] [options]             show detected hardware/claude and exit
   multiclaude-runner mcp    --server URL --run ID                (internal) MCP bridge used by Claude Code
 
 Options for run/doctor:
@@ -60,17 +61,23 @@ func main() {
 	perm := fs.String("permission-mode", env("MC_PERMISSION_MODE", "bypassPermissions"), "Claude Code --permission-mode")
 	extra := fs.String("claude-args", env("MC_CLAUDE_ARGS", ""), "extra arguments passed to claude (space separated)")
 	run := fs.String("run", "", "run id (mcp subcommand)")
+	token := fs.String("token", env("MC_JOIN_TOKEN", ""), "join token for enrolling this machine (Machines → Add a machine)")
 	fs.Usage = func() { usage(); fs.PrintDefaults() }
 	fs.Parse(os.Args[2:])
 
 	cfg := runner.Config{
 		Server: *server, Name: *name, Roles: split(*roles), ExtraCaps: split(*caps), Concurrency: *conc,
 		ClaudePath: *claude, WorkDir: *workdir, PermissionMode: *perm, ExtraArgs: strings.Fields(*extra),
+		JoinToken: *token,
 	}
 	switch sub {
 	case "mcp":
 		if err := runner.ServeMCP(*server, *run, os.Stdin, os.Stdout); err != nil {
 			os.Exit(1)
+		}
+	case "enroll":
+		if err := runner.Enroll(cfg); err != nil {
+			log.Fatal(err)
 		}
 	case "doctor":
 		runner.Doctor(cfg)

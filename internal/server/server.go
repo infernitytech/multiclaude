@@ -1,9 +1,13 @@
 package server
 
 import (
+	"context"
+	"crypto/tls"
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -15,6 +19,8 @@ import (
 	"time"
 
 	"multiclaude/internal/proto"
+
+	"golang.org/x/crypto/acme/autocert"
 )
 
 //go:embed web
@@ -25,6 +31,19 @@ type Server struct {
 	Addr        string
 	DownloadDir string // directory holding prebuilt runner binaries
 
+	// HTTPS (optional). Domains → automatic Let's Encrypt certificates;
+	// CertFile/KeyFile → your own certificate. TLSAddr is the HTTPS listener.
+	Domains   []string
+	ACMEEmail string
+	CertFile  string
+	KeyFile   string
+	TLSAddr   string
+	// DNS-01 validation (any port works): provider "ionos" + its API key.
+	DNSProvider   string
+	DNSAPIKey     string
+	ACMEDirectory string // default: Let's Encrypt production
+	DynDNS        bool   // keep the domains' A records at our public IP
+
 	db  *sql.DB
 	hub *hub
 
@@ -33,6 +52,8 @@ type Server struct {
 	notify  map[string]chan struct{}
 	workCh  chan struct{} // closed & replaced whenever new work may be claimable
 	replies map[string]int
+
+	internalToken string // lets the server talk to its own git endpoint
 }
 
 func New(dataDir, addr, downloadDir string) (*Server, error) {
@@ -60,6 +81,8 @@ func New(dataDir, addr, downloadDir string) (*Server, error) {
 		queues: map[string][]proto.Command{},
 		notify: map[string]chan struct{}{},
 		workCh: make(chan struct{}),
+
+		internalToken: randToken("mci_"),
 	}
 	// Re-apply repo config for existing repos (e.g. after upgrades).
 	rows, err := db.Query(`SELECT slug FROM projects`)
@@ -79,7 +102,7 @@ func (s *Server) logf(f string, a ...any) { log.Printf(f, a...) }
 func (s *Server) listenPort() string {
 	_, port, err := net.SplitHostPort(s.Addr)
 	if err != nil {
-		return ":8080"
+		return ":8090"
 	}
 	return ":" + port
 }
@@ -92,12 +115,69 @@ func fileModTime(f *os.File) time.Time {
 }
 
 func (s *Server) Run() error {
+	s.ensureAdmin()
+	s.joinToken()
 	go s.reaper()
 	mux := http.NewServeMux()
 	s.routes(mux)
-	srv := &http.Server{Addr: s.Addr, Handler: logMiddleware(mux), ReadHeaderTimeout: 30 * time.Second}
-	log.Printf("MultiClaude server %s listening on %s (data: %s)", proto.Version, s.Addr, s.DataDir)
-	return srv.ListenAndServe()
+	handler := logMiddleware(s.authMiddleware(mux))
+	newSrv := func(addr string, h http.Handler) *http.Server {
+		return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 30 * time.Second, IdleTimeout: 5 * time.Minute}
+	}
+	errc := make(chan error, 2)
+	httpHandler := handler
+	if s.DynDNS {
+		if s.DNSProvider != "ionos" || len(s.Domains) == 0 {
+			return errors.New("dynamic DNS needs MC_DOMAIN and MC_DNS_PROVIDER=ionos")
+		}
+		go runDynDNS(context.Background(), newIONOS(s.DNSAPIKey), s.Domains)
+	}
+	switch {
+	case len(s.Domains) > 0 && s.DNSProvider != "":
+		var p dnsProvider
+		switch s.DNSProvider {
+		case "ionos":
+			if s.DNSAPIKey == "" {
+				return errors.New("MC_DNS_API_KEY is required for MC_DNS_PROVIDER=ionos")
+			}
+			p = newIONOS(s.DNSAPIKey)
+		case "cloudflare":
+			if s.DNSAPIKey == "" {
+				return errors.New("MC_DNS_API_KEY (a Cloudflare API token) is required for MC_DNS_PROVIDER=cloudflare")
+			}
+			p = newCloudflare(s.DNSAPIKey)
+		default:
+			return fmt.Errorf("unknown DNS provider %q (supported: cloudflare, ionos)", s.DNSProvider)
+		}
+		m := newDNSCertManager(s.Domains, s.ACMEEmail, filepath.Join(s.DataDir, "certs"), s.ACMEDirectory, p)
+		m.Start(context.Background())
+		tsrv := newSrv(s.TLSAddr, handler)
+		tsrv.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate, MinVersion: tls.VersionTLS12}
+		go func() { errc <- tsrv.ListenAndServeTLS("", "") }()
+		log.Printf("HTTPS on %s for %s (Let's Encrypt via %s DNS)", s.TLSAddr, strings.Join(s.Domains, ", "), s.DNSProvider)
+	case len(s.Domains) > 0:
+		m := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(s.Domains...),
+			Cache:      autocert.DirCache(filepath.Join(s.DataDir, "certs")),
+			Email:      s.ACMEEmail,
+		}
+		tsrv := newSrv(s.TLSAddr, handler)
+		tsrv.TLSConfig = m.TLSConfig() // includes the TLS-ALPN-01 challenge: only the HTTPS port must be reachable
+		go func() { errc <- tsrv.ListenAndServeTLS("", "") }()
+		httpHandler = m.HTTPHandler(handler) // also answers HTTP-01 challenges; other requests are served normally
+		log.Printf("HTTPS on %s with Let's Encrypt certificates for %s (TLS-ALPN challenge: external port 443 must reach this port)", s.TLSAddr, strings.Join(s.Domains, ", "))
+	case s.CertFile != "":
+		tsrv := newSrv(s.TLSAddr, handler)
+		go func() { errc <- tsrv.ListenAndServeTLS(s.CertFile, s.KeyFile) }()
+		log.Printf("HTTPS on %s with certificate %s", s.TLSAddr, s.CertFile)
+	}
+	if s.Addr != "" && s.Addr != "off" {
+		go func() { errc <- newSrv(s.Addr, httpHandler).ListenAndServe() }()
+		log.Printf("HTTP on %s", s.Addr)
+	}
+	log.Printf("MultiClaude server %s (data: %s)", proto.Version, s.DataDir)
+	return <-errc
 }
 
 func logMiddleware(h http.Handler) http.Handler {
@@ -112,6 +192,17 @@ func logMiddleware(h http.Handler) http.Handler {
 func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("/git/", s.handleGit)
 
+	// Auth
+	m.HandleFunc("GET /api/auth", s.apiAuth)
+	m.HandleFunc("/api/login", s.apiLogin)
+	m.HandleFunc("POST /api/logout", s.apiLogout)
+	m.HandleFunc("GET /api/users", s.apiUsers)
+	m.HandleFunc("POST /api/users", s.apiCreateUser)
+	m.HandleFunc("PATCH /api/users/{id}", s.apiUpdateUser)
+	m.HandleFunc("DELETE /api/users/{id}", s.apiDeleteUser)
+	m.HandleFunc("GET /api/runner-setup", s.apiRunnerSetup)
+	m.HandleFunc("POST /api/runner-setup/rotate", s.apiRunnerSetup)
+
 	// UI API
 	m.HandleFunc("GET /api/events", s.handleEvents)
 	m.HandleFunc("GET /api/overview", s.apiOverview)
@@ -121,6 +212,7 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("PATCH /api/projects/{slug}", s.apiUpdateProject)
 	m.HandleFunc("DELETE /api/projects/{slug}", s.apiDeleteProject)
 	m.HandleFunc("GET /api/projects/{slug}/issues", s.apiIssues)
+	m.HandleFunc("GET /api/projects/{slug}/board", s.apiBoard)
 	m.HandleFunc("POST /api/projects/{slug}/issues", s.apiCreateIssue)
 	m.HandleFunc("GET /api/projects/{slug}/issues/{n}", s.apiIssue)
 	m.HandleFunc("PATCH /api/projects/{slug}/issues/{n}", s.apiUpdateIssue)

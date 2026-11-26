@@ -1,7 +1,8 @@
-IMAGE ?= multiclaude:latest
+# Fully qualified so podman-built images load into Docker as plain "multiclaude:latest".
+IMAGE ?= docker.io/library/multiclaude:latest
 GO ?= go
 
-.PHONY: build runners image image-tar dev clean
+.PHONY: build runners image image-tar serve-image deploy-nas dev clean
 
 build:
 	$(GO) build -o bin/ ./cmd/...
@@ -21,8 +22,24 @@ image:
 image-tar: image
 	$$(command -v docker || command -v podman) save -o multiclaude.tar $(IMAGE)
 
+# Without SSH: serve the image from this computer and load it from the
+# TrueNAS web shell (System → Shell). Prints the command to paste there.
+PORT ?= 8000
+serve-image: image
+	@rm -rf .serve && mkdir .serve && $$(command -v docker || command -v podman) save -o .serve/multiclaude.tar $(IMAGE)
+	@ip=$$(hostname -I 2>/dev/null | awk '{print $$1}'); [ -n "$$ip" ] || ip=$$(ipconfig getifaddr en0 2>/dev/null); \
+	echo; echo "Paste this into TrueNAS → System → Shell (Ctrl+C here when done):"; echo; \
+	echo "  curl -fL http://$$ip:$(PORT)/multiclaude.tar -o /tmp/mc.tar && img=\$$(sudo docker load -q -i /tmp/mc.tar | awk '{print \$$NF}') && sudo docker tag \$$img multiclaude:latest && rm /tmp/mc.tar && sudo docker images multiclaude"; echo; \
+	python3 -m http.server $(PORT) --bind 0.0.0.0 --directory .serve 2>&1 | grep --line-buffered multiclaude.tar
+
+# With SSH enabled on the NAS: make deploy-nas NAS=truenas_admin@192.168.1.10
+deploy-nas: image
+	@test -n "$(NAS)" || (echo "usage: make deploy-nas NAS=user@nas-ip" >&2; exit 1)
+	$$(command -v docker || command -v podman) save $(IMAGE) | ssh -o ConnectTimeout=10 $(NAS) "sudo docker load"
+	@echo "Image loaded on $(NAS). In TrueNAS: Apps → multiclaude → Restart."
+
 dev: build runners
 	./bin/multiclaude-server --data ./data --downloads ./dist
 
 clean:
-	rm -rf bin dist multiclaude.tar
+	rm -rf bin dist multiclaude.tar .serve

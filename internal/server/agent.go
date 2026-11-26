@@ -17,6 +17,10 @@ func (s *Server) agentCall(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	if run, err := s.runByID(c.RunID); err != nil || run.NodeID != nodeFrom(r) {
+		writeJSON(w, proto.AgentResult{Text: "unknown run for this machine", IsError: true})
+		return
+	}
 	text, err := s.dispatchTool(c)
 	if err != nil {
 		writeJSON(w, proto.AgentResult{Text: err.Error(), IsError: true})
@@ -58,11 +62,24 @@ func (s *Server) dispatchTool(c proto.AgentCall) (string, error) {
 
 	switch c.Tool {
 	case "list_issues":
-		issues, err := s.listIssues(p.ID, str("status"), str("query"))
+		q := issueQuery{Status: firstNonEmpty(str("status"), "open"), Q: str("query"), Label: str("label"), Requires: str("requires"), Order: str("order"), Limit: intv("limit"), Offset: intv("offset")}
+		if q.Status == "all" {
+			q.Status = ""
+		}
+		if q.Limit <= 0 || q.Limit > 200 {
+			q.Limit = 60
+		}
+		if q.Order == "" && q.Status == "done" {
+			q.Order = "updated"
+		}
+		issues, total, err := s.queryIssues(p.ID, q)
 		if err != nil {
 			return "", err
 		}
 		var b strings.Builder
+		if total > q.Offset+len(issues) {
+			fmt.Fprintf(&b, "Showing %d–%d of %d matching issues (narrow with status/query/label/requires, or page with offset).\n", q.Offset+1, q.Offset+len(issues), total)
+		}
 		for _, i := range issues {
 			fmt.Fprintf(&b, "#%d [%s] (%s) %s", i.Number, i.Status, priorityNames[clampPrio(i.Priority)], i.Title)
 			if i.Assignee != "" && (i.Status == "in_progress" || i.Status == "review") {
@@ -95,7 +112,7 @@ func (s *Server) dispatchTool(c proto.AgentCall) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Created issue #%d (%s).", i.Number, i.Status), nil
+		return fmt.Sprintf("Created issue #%d (%s).", i.Number, i.Status) + s.schedulabilityNote(p, i), nil
 
 	case "update_issue":
 		i, err := s.issueByNumber(p.ID, intv("number"))
@@ -104,13 +121,23 @@ func (s *Server) dispatchTool(c proto.AgentCall) (string, error) {
 		}
 		var in issueInput
 		json.Unmarshal(c.Args, &in)
-		if in.Status != nil && i.RunID == run.ID {
-			return "", fmt.Errorf("use complete_work / block_issue / review_verdict to change the status of your own assignment")
+		if in.Status != nil && *in.Status != i.Status {
+			if i.RunID == run.ID {
+				return "", fmt.Errorf("use complete_work / block_issue / review_verdict to change the status of your own assignment")
+			}
+			if i.RunID != "" {
+				return "", fmt.Errorf("#%d is being worked on by another agent right now; its status can't be changed (message that agent with post_chat, or comment_issue)", i.Number)
+			}
+			agentMoves := map[string]bool{"backlog": true, "todo": true, "blocked": true}
+			if !agentMoves[i.Status] || !agentMoves[*in.Status] {
+				return "", fmt.Errorf("agents may only move issues between backlog, todo and blocked (#%d is %s). Claiming, review and done are handled by the server", i.Number, i.Status)
+			}
 		}
-		if _, err := s.updateIssue(p, i, in, me); err != nil {
+		u, err := s.updateIssue(p, i, in, me)
+		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Updated #%d.", i.Number), nil
+		return fmt.Sprintf("Updated #%d.", i.Number) + s.schedulabilityNote(p, u), nil
 
 	case "comment_issue":
 		i, err := s.issueByNumber(p.ID, intv("number"))
@@ -249,6 +276,7 @@ func (s *Server) listNodes() ([]*Node, error) {
 			for rr.Next() {
 				if r, err := scanRun(rr); err == nil {
 					r.Prompt = ""
+					r.Activity = activityOf(r.ID)
 					n.Active = append(n.Active, *r)
 				}
 			}

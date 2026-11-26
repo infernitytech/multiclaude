@@ -261,6 +261,19 @@ func (s *Server) apiIssues(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		return
 	}
+	if r.URL.Query().Has("limit") { // paginated: {items, total}
+		q := queryFromReq(r)
+		if q.Limit <= 0 || q.Limit > 500 {
+			q.Limit = 100
+		}
+		items, total, err := s.queryIssues(p.ID, q)
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"items": items, "total": total})
+		return
+	}
 	issues, err := s.listIssues(p.ID, r.URL.Query().Get("status"), r.URL.Query().Get("q"))
 	if err != nil {
 		httpErr(w, 500, err.Error())
@@ -467,6 +480,9 @@ func (s *Server) apiRun(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "run not found")
 		return
 	}
+	if run.Status == "running" {
+		run.Activity = activityOf(run.ID)
+	}
 	writeJSON(w, run)
 }
 
@@ -588,12 +604,13 @@ func (s *Server) apiUpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Paused    *bool     `json:"paused"`
-		Roles     *[]string `json:"roles"` // empty array = reset to runner-reported
-		MaxConc   *int      `json:"max_conc"`
-		ExtraCaps *[]string `json:"extra_caps"`
-		Model     *string   `json:"model"`
-		Name      *string   `json:"name"`
+		Paused       *bool     `json:"paused"`
+		Roles        *[]string `json:"roles"` // empty array = reset to runner-reported
+		MaxConc      *int      `json:"max_conc"`
+		ExtraCaps    *[]string `json:"extra_caps"`
+		DisabledCaps *[]string `json:"disabled_caps"`
+		Model        *string   `json:"model"`
+		Name         *string   `json:"name"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, err.Error())
@@ -614,6 +631,9 @@ func (s *Server) apiUpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.ExtraCaps != nil {
 		s.db.Exec(`UPDATE nodes SET extra_caps=? WHERE id=?`, jsonStr(cleanList(*in.ExtraCaps)), n.ID)
+	}
+	if in.DisabledCaps != nil {
+		s.db.Exec(`UPDATE nodes SET disabled_caps=? WHERE id=?`, jsonStr(cleanList(*in.DisabledCaps)), n.ID)
 	}
 	if in.Model != nil {
 		s.db.Exec(`UPDATE nodes SET model=? WHERE id=?`, strings.TrimSpace(*in.Model), n.ID)

@@ -1,15 +1,35 @@
-# TrueNAS SCALE: Apps → Discover Apps → ⋮ → "Install via YAML", paste this file.
-# 1. Create a dataset, e.g. /mnt/tank/apps/multiclaude, owned by user "apps" (568).
-# 2. Adjust the host path and the image name below.
+# MultiClaude on TrueNAS SCALE (24.10+): Apps → Discover Apps → ⋮ → "Install via YAML", paste this file.
+# Full guide: deploy/TRUENAS.md
+#
+# Before installing:
+#  1. Create a dataset, e.g. /mnt/tank/apps/multiclaude, owned by user "apps" (568).
+#  2. Load the image onto the NAS (`make serve-image`, see the guide).
+#  3. Edit the host path and the MC_* values below.
 services:
   multiclaude:
-    image: ghcr.io/YOUR_GITHUB_USER/multiclaude:latest   # or "multiclaude:latest" if you loaded the image manually
+    image: multiclaude:latest            # loaded with `docker load`; or ghcr.io/<you>/multiclaude:latest
+    pull_policy: never                   # remove this line when using a registry image
     container_name: multiclaude
     restart: unless-stopped
     user: "568:568"
     ports:
-      - "8080:8080"
+      - "8090:8090"     # plain HTTP for the LAN — do NOT forward this port on your router
+      - "8943:8443"     # HTTPS — external TCP 8943 must reach NAS port 8943
     volumes:
       - /mnt/tank/apps/multiclaude:/data
     environment:
       TZ: Europe/Berlin
+      # Name that points to your home connection. Users and runners use
+      # https://multiclaude.example.com:8943
+      MC_DOMAIN: multiclaude.example.com
+      # Let's Encrypt certificate via the DNS challenge — works on any port.
+      # cloudflare: an API token with Zone → DNS → Edit and Zone → Zone → Read
+      # ionos:      an API key from developer.hosting.ionos.de as "prefix.secret"
+      MC_DNS_PROVIDER: cloudflare
+      MC_DNS_API_KEY: "paste-the-token-here"
+      # IONOS only: keep the A record pointed at your public IP (MC_DYNDNS: "on").
+      # MC_ACME_EMAIL: you@example.de      # optional: expiry notices from Let's Encrypt
+      # First admin account. Without this a random password is generated and
+      # printed in the app logs (and saved to /data/initial-admin-password.txt).
+      # MC_ADMIN_USER: admin
+      # MC_ADMIN_PASSWORD: change-me-please

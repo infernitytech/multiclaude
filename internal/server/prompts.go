@@ -31,7 +31,7 @@ You are part of MultiClaude: a swarm of Claude Code agents on several machines w
 
 Coordination rules:
 - The "multiclaude" MCP tools are your interface to the board and chat: list_issues, get_issue, create_issue, update_issue, comment_issue, complete_work, block_issue, review_verdict, post_chat, read_chat, list_agents.
-- Stay within the scope of your assignment. Record other work you discover as new issues (create_issue) with enough context for another agent; set "requires" (e.g. ["gpu"]) when only specific hardware can do it, and "depends_on" for ordering.
+- Stay within the scope of your assignment. Record other work you discover as new issues (create_issue) with enough context for another agent; set "requires" only when specific hardware is needed (see "Hardware routing" below), and "depends_on" for ordering.
 - Large work: split it into independent issues so several machines can work in parallel, and/or use subagents (Task tool) inside your own assignment.
 - Other agents push to the same repository concurrently. Only push your own branch unless told otherwise. Never force-push the default branch %q.
 - Human instructions arriving in this conversation (marked as project chat messages) take priority. Answer them briefly and continue.
@@ -45,12 +45,14 @@ How the swarm works (so you know what happens around you):
 - Consequences for you: never try to claim or start other issues yourself and don't move other issues to in_progress/review/done — create well-described todo issues (with priority, requires, depends_on) and the swarm picks them up in parallel. Writing a good issue is how you delegate.
 - Branches: each issue is worked on its own branch issue-<number> pushed to origin; the server merges it into %[6]q after approval (or directly in "no review" mode). If a session ends without its finish signal, the attempt counts as failed: the issue goes back to todo with your final output as a comment (uncommitted changes are salvaged as a WIP commit on the branch); after 3 failed attempts it becomes blocked.
 `, n.Name, hwSummary(n), strings.Join(n.AllCaps(), ", "), strings.Join(n.Roles, ", "), agentHandle(n.Name, runID), p.DefaultBranch)
-	b.WriteString(s.projectContext(p, n))
+	b.WriteString(s.projectContext(p))
 	if roster := s.agentRoster(p.ID, runID); roster != "" {
 		fmt.Fprintf(&b, "\nAgents running on this project when you started (may change; use list_agents):\n%s", roster)
 	} else {
 		b.WriteString("\nNo other agents were running on this project when you started (use list_agents to check later).\n")
 	}
+	b.WriteString(s.hardwareRouting(p))
+	b.WriteString(s.briefing(p))
 	if strings.TrimSpace(p.Instructions) != "" {
 		fmt.Fprintf(&b, "\nProject instructions from the humans:\n%s\n", p.Instructions)
 	}
@@ -65,27 +67,12 @@ var reviewModeText = map[string]string{
 
 // projectContext describes the project itself. Facts only the runner knows
 // (exact clone URL, local checkout path) are appended by the runner.
-func (s *Server) projectContext(p *Project, self *Node) string {
+func (s *Server) projectContext(p *Project) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nProject:\n- Name: %s\n- Slug: %s (git repository %s.git on the MultiClaude server; it is the \"origin\" remote of your checkout)\n- Default branch: %s\n",
 		p.Name, p.Slug, p.Slug, p.DefaultBranch)
 	if rm, ok := reviewModeText[p.ReviewMode]; ok {
 		fmt.Fprintf(&b, "- Review mode: %s\n", rm)
-	}
-	var others []string
-	rows, err := s.db.Query(`SELECT n.name FROM node_projects np JOIN nodes n ON n.id=np.node_id WHERE np.project_id=? AND n.id<>? ORDER BY n.name`, p.ID, self.ID)
-	if err == nil {
-		for rows.Next() {
-			var name string
-			rows.Scan(&name)
-			others = append(others, name)
-		}
-		rows.Close()
-	}
-	if len(others) > 0 {
-		fmt.Fprintf(&b, "- Other machines on this project: %s (use list_agents for live status)\n", strings.Join(others, ", "))
-	} else {
-		b.WriteString("- You are currently the only machine assigned to this project.\n")
 	}
 	if d := strings.TrimSpace(p.Description); d != "" {
 		fmt.Fprintf(&b, "- Description:\n%s\n", d)

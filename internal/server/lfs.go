@@ -91,6 +91,18 @@ func (s *Server) lfsBatch(w http.ResponseWriter, r *http.Request, slug string) {
 		return
 	}
 	href := fmt.Sprintf("%s/git/%s.git/info/lfs/objects/", baseURL(r), slug)
+	// Transfers must carry the same credentials as the batch request.
+	var hdr map[string]string
+	if a := r.Header.Get("Authorization"); a != "" {
+		hdr = map[string]string{"Authorization": a}
+	}
+	action := func(h string) map[string]any {
+		a := map[string]any{"href": h}
+		if hdr != nil {
+			a["header"] = hdr
+		}
+		return a
+	}
 	out := make([]map[string]any, 0, len(req.Objects))
 	for _, o := range req.Objects {
 		obj := map[string]any{"oid": o.OID, "size": o.Size, "authenticated": true}
@@ -104,11 +116,11 @@ func (s *Server) lfsBatch(w http.ResponseWriter, r *http.Request, slug string) {
 		switch req.Operation {
 		case "upload":
 			if !exists {
-				obj["actions"] = map[string]any{"upload": map[string]any{"href": href + o.OID}}
+				obj["actions"] = map[string]any{"upload": action(href + o.OID)}
 			}
 		default:
 			if exists {
-				obj["actions"] = map[string]any{"download": map[string]any{"href": href + o.OID}}
+				obj["actions"] = map[string]any{"download": action(href + o.OID)}
 			} else {
 				obj["error"] = map[string]any{"code": 404, "message": "object not found"}
 			}

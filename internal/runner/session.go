@@ -116,7 +116,7 @@ func (s *session) git(args ...string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = s.dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true", "SSH_ASKPASS="), s.r.gitEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -132,6 +132,7 @@ Environment:
 - Local checkout (your working directory): %s
 - MultiClaude server: %s (board: %s/p/%s)
 - Current branch: %s
+- Git authentication to origin is already configured through GIT_CONFIG_* environment variables; just use git normally. Never print, log or commit those values.
 `, s.r.cfg.Server+s.a.RepoURL, s.dir, s.r.cfg.Server, s.r.cfg.Server, s.a.ProjectSlug, s.a.Branch)
 }
 
@@ -144,7 +145,7 @@ func (s *session) prepare() error {
 		os.RemoveAll(s.dir)
 		s.info("cloning %s", url)
 		cmd := exec.Command("git", "clone", url, s.dir)
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true", "SSH_ASKPASS="), s.r.gitEnv()...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("clone failed: %v: %s", err, out)
 		}
@@ -345,6 +346,7 @@ func (s *session) runClaude(messages []string) error {
 			"type":    "stdio",
 			"command": s.r.self,
 			"args":    []string{"mcp", "--server", s.r.cfg.Server, "--run", s.a.RunID},
+			"env":     map[string]string{"MC_TOKEN": s.r.token},
 		},
 	}}
 	mcpPath := filepath.Join(s.r.cfg.WorkDir, "mcp", s.a.RunID+".json")
@@ -372,6 +374,7 @@ func (s *session) runClaude(messages []string) error {
 		"MULTICLAUDE_SERVER="+s.r.cfg.Server,
 		"MULTICLAUDE_PROJECT="+s.a.ProjectSlug,
 	)
+	cmd.Env = append(cmd.Env, s.r.gitEnv()...) // git push/pull from the agent's shell is authenticated
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

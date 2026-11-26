@@ -2,7 +2,8 @@
 
 A self-hosted coordination server for a swarm of **Claude Code** machines working on the same projects.
 
-- **Git hosting** over smart HTTP, with a built-in **Git LFS** server. No authentication; it's meant for your LAN.
+- **Git hosting** over smart HTTP, with a built-in **Git LFS** server.
+- **Safe to expose to the internet**: HTTPS with automatic Let's Encrypt certificates, username/password logins (also for git), and per-machine tokens for runners that are enrolled with a single command.
 - A **project board** per repository: backlog / to do / in progress / review / blocked / done, with priorities, labels, required capabilities and dependencies. It has quick-add and drag & drop.
 - **Machines** run a small daemon (`multiclaude-runner`). The runner detects the local Claude Code installation (logged into that machine's own subscription) and its hardware: CPU, RAM, GPUs and installed toolchains. It then claims and works on issues automatically.
 - **Coordination**: the server matches issues to machines by capability. An issue with `requires: gpu` goes only to GPU machines, and those machines take it before generic work. Machines with the *reviewer* role review finished work. Approved branches are merged into `main` on the server.
@@ -32,25 +33,44 @@ The server is a single container. It needs one persistent volume, mounted at `/d
 - *Registry*: push this repo to GitHub. The included workflow (`.github/workflows/image.yml`) publishes `ghcr.io/<you>/multiclaude:latest`.
 - *Manual*: `make image-tar` on your workstation, copy `multiclaude.tar` to the NAS, then run `sudo docker load -i multiclaude.tar`.
 
-**Install**: create a dataset, e.g. `/mnt/tank/apps/multiclaude`, owned by the `apps` user (568). Then go to *Apps → Discover Apps → ⋮ → Install via YAML* and paste [`deploy/docker-compose.yml`](deploy/docker-compose.yml). Adjust the image name and host path first.
+- *From your workstation*: `make serve-image` serves the image and prints a command to paste into the TrueNAS web shell. With SSH enabled on the NAS, use `make deploy-nas NAS=truenas_admin@<nas-ip>` instead.
 
-Open `http://<nas>:8080`.
+**Install**: create a dataset, e.g. `/mnt/tank/apps/multiclaude`, owned by the `apps` user (568). Then go to *Apps → Discover Apps → ⋮ → Install via YAML* and paste [`deploy/docker-compose.yml`](deploy/docker-compose.yml). Adjust the image name, host path and `MC_DOMAIN` first.
 
-Other hosts work the same way: `docker run -d -p 8080:8080 -v /srv/multiclaude:/data multiclaude:latest`. To run it without Docker, use `make build && ./bin/multiclaude-server --data ./data`. That needs `git` and `git-lfs` on the PATH.
+Open `http://<nas>:8090` (LAN) or `https://<your domain>`. The first start prints a generated `admin` password in the app logs. **[deploy/TRUENAS.md](deploy/TRUENAS.md)** walks through the whole internet-facing setup: domain, port forwarding, certificates, users, machines.
+
+| Server setting (flag / env) | Default | Meaning |
+|---|---|---|
+| `--addr` / `MC_ADDR` | `:8090` | Plain HTTP listener (`off` disables it) |
+| `--domain` / `MC_DOMAIN` | – | Public name(s). Turns on HTTPS with Let's Encrypt |
+| `--dns-provider`, `--dns-api-key` / `MC_DNS_PROVIDER`, `MC_DNS_API_KEY` | – | `cloudflare` or `ionos`: get the certificate via the DNS challenge, which works on any port. Without it the TLS-ALPN challenge is used, which needs external port 443 |
+| `--dyndns` / `MC_DYNDNS=on` | off | Keep the domain's `A` record at the current public IP (IONOS) |
+| `--acme-directory` / `MC_ACME_DIRECTORY` | Let's Encrypt | e.g. the Let's Encrypt staging URL for testing |
+| `--tls-addr` / `MC_TLS_ADDR` | `:8443` | HTTPS listener |
+| `--tls-cert`, `--tls-key` / `MC_TLS_CERT`, `MC_TLS_KEY` | – | Use your own certificate instead |
+| `--acme-email` / `MC_ACME_EMAIL` | – | Contact address for Let's Encrypt |
+| `MC_ADMIN_USER`, `MC_ADMIN_PASSWORD` | `admin`, random | First account, created only when there are no users |
+| `--data` / `MC_DATA` | `./data` | Repositories, LFS objects, database, certificates |
+
+`multiclaude-server reset-password [user]` sets a new random password.
+
+Other hosts work the same way: `docker run -d -p 8090:8090 -v /srv/multiclaude:/data multiclaude:latest`. To run it without Docker, use `make build && ./bin/multiclaude-server --data ./data`. That needs `git` and `git-lfs` on the PATH.
 
 ## 2. Add machines
 
-Do this on every computer that should work for you, as the normal user that is logged into Claude Code:
+Do this on every computer that should work for you, as the normal user that is logged into Claude Code. Copy the command from **Machines → Add a machine**, which includes the join token:
 
 ```sh
-curl -fsSL http://<nas>:8080/install.sh | sh
+curl -fsSL https://<server>/install.sh | sh -s -- --token mcj_…
 # options:
-curl -fsSL http://<nas>:8080/install.sh | sh -s -- --name gpu-box --roles worker --concurrency 4 --caps unity
+curl -fsSL https://<server>/install.sh | sh -s -- --token mcj_… --name gpu-box --roles worker --concurrency 4 --caps unity
 ```
+
+The join token enrolls the machine once. The machine then gets its own token, stored in `~/.multiclaude/credentials.json`, which it uses for the API and for git. Removing a machine in the UI revokes it. Without the installer: `multiclaude-runner enroll --server URL --token mcj_…` and then `multiclaude-runner run`.
 
 The script installs `~/.local/bin/multiclaude-runner` plus a systemd user service (Linux) or a LaunchAgent (macOS). On Linux, run `sudo loginctl enable-linger $USER` so the service keeps running when you're logged out.
 
-Requirements on each machine: `git`, `git-lfs`, and Claude Code (`claude`), logged in. Run `multiclaude-runner doctor --server http://<nas>:8080` to see what the runner detects.
+Requirements on each machine: `git`, `git-lfs`, and Claude Code (`claude`), logged in. Run `multiclaude-runner doctor` to see what the runner detects and whether it's enrolled.
 
 Then open **Machines** in the UI and **assign each machine to projects**. New machines stay idle until you do. You can also override the machine's settings there:
 
@@ -63,7 +83,8 @@ You can pause a machine at any time.
 
 | Runner flag | Default | Meaning |
 |---|---|---|
-| `--server` | – | Server URL |
+| `--server` | from credentials | Server URL |
+| `--token` | – | Join token (only needed to enroll) |
 | `--name` | hostname | Display name |
 | `--roles` | `worker,reviewer` | `worker` implements issues, `reviewer` reviews them |
 | `--concurrency` | 2 | Parallel Claude Code sessions (can be overridden in the UI) |
@@ -81,7 +102,7 @@ Auto-detected capabilities include:
 
 ## 3. Work with it
 
-1. **Create a project.** It gets a git repository at `http://<nas>:8080/git/<slug>.git`, optionally imported from an existing URL.
+1. **Create a project.** It gets a git repository at `https://<server>/git/<slug>.git` (log in with your username and password), optionally imported from an existing URL.
 2. **Add issues.** Use the quick-add box (`n` focuses it). Syntax: `Train the model !high +gpu #ml`, where `!urgent|!high|!medium|!low` sets the priority, `+cap` adds a required capability, and `#label` adds a label. Open an issue to edit its description, dependencies, etc.
 3. **Machines claim issues** from *To do*, by priority and board order:
    - Each issue is worked on in branch `issue-N`, then moves to *Review*.
@@ -116,14 +137,14 @@ Moving an issue out of *In progress*/*Review* on the board cancels the agent wor
 
 ### API
 
-Everything the UI does goes through a JSON API under `/api/…` (see `internal/server/server.go` for the routes), so you can script it, e.g.:
+Everything the UI does goes through a JSON API under `/api/…` (see `internal/server/server.go` for the routes), so you can script it with Basic auth, e.g.:
 
 ```sh
-curl -XPOST http://nas:8080/api/projects/my-game/issues -d '{"title":"Fix jump","priority":"high","requires":["gpu"]}'
+curl -u admin:PASSWORD -XPOST https://<server>/api/projects/my-game/issues -d '{"title":"Fix jump","priority":"high","requires":["gpu"]}'
 ```
 
 ## Limits & notes
 
-- No authentication or TLS. Keep it on a trusted network, or put a reverse proxy with auth in front of it.
+- All accounts have full access (no roles). Agents can use their machine's token, so only enroll machines you trust.
 - Runners support Linux and macOS. On Windows, use WSL.
 - The cost shown is Claude Code's API-equivalent estimate. On subscriptions it's informational only.
