@@ -16,6 +16,7 @@ type issueInput struct {
 	Requires  *[]string        `json:"requires"`
 	DependsOn *[]int           `json:"depends_on"`
 	Sort      *float64         `json:"sort"`
+	Model     *string          `json:"model"`
 }
 
 func parsePriority(raw *json.RawMessage) (int, bool) {
@@ -94,9 +95,13 @@ func (s *Server) createIssue(p *Project, in issueInput, author string) (*Issue, 
 	var maxSort float64
 	tx.QueryRow(`SELECT COALESCE(MAX(sort),0) FROM issues WHERE project_id=?`, p.ID).Scan(&maxSort)
 	t := now()
-	res, err := tx.Exec(`INSERT INTO issues(project_id,number,title,body,status,priority,labels,requires,depends_on,created_by,created_at,updated_at,sort)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, num, strings.TrimSpace(*in.Title), body, status, prio,
-		jsonStr(nz(labels)), jsonStr(nz(req)), jsonStr(nzi(deps)), author, t, t, maxSort+1)
+	model := ""
+	if in.Model != nil {
+		model = strings.TrimSpace(*in.Model)
+	}
+	res, err := tx.Exec(`INSERT INTO issues(project_id,number,title,body,status,priority,labels,requires,depends_on,created_by,created_at,updated_at,sort,model)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, num, strings.TrimSpace(*in.Title), body, status, prio,
+		jsonStr(nz(labels)), jsonStr(nz(req)), jsonStr(nzi(deps)), author, t, t, maxSort+1, model)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +144,9 @@ func (s *Server) updateIssue(p *Project, i *Issue, in issueInput, author string)
 	}
 	if in.Labels != nil {
 		add("labels", jsonStr(cleanList(*in.Labels)))
+	}
+	if in.Model != nil {
+		add("model", strings.TrimSpace(*in.Model))
 	}
 	if in.Requires != nil {
 		add("requires", jsonStr(cleanList(*in.Requires)))

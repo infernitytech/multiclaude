@@ -432,6 +432,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "authentication required", 401)
 			return
 
+		// artifacts: machines (agents) use their node token
+		case isArtifactPath(p) && bearer(r) != "" && s.nodeByToken(bearer(r)) != "":
+			ctx = context.WithValue(ctx, ctxNode, s.nodeByToken(bearer(r)))
+
 		// UI API: session cookie
 		case strings.HasPrefix(p, "/api/"):
 			u := s.sessionUser(r)
@@ -623,4 +627,10 @@ func (s *Server) enroll(r *http.Request, reqNodeID, joinTok string) (id, newToke
 		}
 	}
 	return id, randToken("mcn_"), nil
+}
+
+// isArtifactPath: /api/projects/<slug>/artifacts[/…]
+func isArtifactPath(p string) bool {
+	parts := strings.SplitN(strings.TrimPrefix(p, "/api/projects/"), "/", 3)
+	return strings.HasPrefix(p, "/api/projects/") && len(parts) >= 2 && parts[1] == "artifacts"
 }

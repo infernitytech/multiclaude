@@ -194,6 +194,7 @@ func (s *Server) apiUpdateProject(w http.ResponseWriter, r *http.Request) {
 		ReviewMode   *string `json:"review_mode"`
 		Instructions *string `json:"instructions"`
 		Dispatch     *bool   `json:"dispatch"`
+		Model        *string `json:"model"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, err.Error())
@@ -214,8 +215,11 @@ func (s *Server) apiUpdateProject(w http.ResponseWriter, r *http.Request) {
 	if in.Dispatch != nil {
 		p.Dispatch = *in.Dispatch
 	}
-	s.db.Exec(`UPDATE projects SET name=?,description=?,review_mode=?,instructions=?,dispatch=? WHERE id=?`,
-		p.Name, p.Description, p.ReviewMode, p.Instructions, p.Dispatch, p.ID)
+	if in.Model != nil {
+		p.Model = strings.TrimSpace(*in.Model)
+	}
+	s.db.Exec(`UPDATE projects SET name=?,description=?,review_mode=?,instructions=?,dispatch=?,model=? WHERE id=?`,
+		p.Name, p.Description, p.ReviewMode, p.Instructions, p.Dispatch, p.Model, p.ID)
 	s.emit(event{Type: "projects"})
 	s.workAvailable()
 	writeJSON(w, p)
@@ -246,6 +250,7 @@ func (s *Server) apiDeleteProject(w http.ResponseWriter, r *http.Request) {
 		`DELETE FROM messages WHERE project_id=?`, `DELETE FROM node_projects WHERE project_id=?`,
 		`DELETE FROM chat_sessions WHERE project_id=?`,
 		`DELETE FROM mirrors WHERE repo_id IN (SELECT id FROM repos WHERE project_id=?)`, `DELETE FROM repos WHERE project_id=?`,
+		`DELETE FROM artifacts WHERE project_id=?`, `DELETE FROM questions WHERE project_id=?`,
 		`DELETE FROM projects WHERE id=?`,
 	} {
 		s.db.Exec(q, p.ID)
@@ -256,6 +261,7 @@ func (s *Server) apiDeleteProject(w http.ResponseWriter, r *http.Request) {
 	os.Rename(s.repoPath(p.Slug), filepath.Join(trash, "repo.git"))
 	os.Rename(filepath.Join(s.DataDir, "lfs", p.Slug), filepath.Join(trash, "lfs"))
 	os.Rename(filepath.Join(s.DataDir, "repos", p.Slug), filepath.Join(trash, "repos")) // further repos
+	os.Rename(s.artifactDir(p.ID), filepath.Join(trash, "artifacts"))
 	if more, _ := filepath.Glob(filepath.Join(s.DataDir, "lfs", p.Slug+"~*")); len(more) > 0 {
 		for _, d := range more {
 			os.Rename(d, filepath.Join(trash, "lfs-"+filepath.Base(d)))
@@ -579,6 +585,41 @@ func (s *Server) apiRunMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.injectIntoRun(run, "[Message from human]\n"+in.Body)
 	writeJSON(w, map[string]string{"run_id": run.ID})
+}
+
+// apiRunRestart switches a running issue session to another model: the model
+// is stored on the issue, the session stops (uncommitted work is saved as a
+// WIP commit on the branch, no failed attempt is counted) and the issue is
+// picked up again — the next session continues from the branch.
+func (s *Server) apiRunRestart(w http.ResponseWriter, r *http.Request) {
+	run, err := s.runByID(r.PathValue("id"))
+	if err != nil {
+		httpErr(w, 404, "run not found")
+		return
+	}
+	var in struct {
+		Model string `json:"model"`
+	}
+	readJSON(r, &in)
+	if run.Status != "running" || run.IssueID == nil {
+		httpErr(w, 409, "only running issue sessions can be restarted")
+		return
+	}
+	in.Model = strings.TrimSpace(in.Model)
+	s.db.Exec(`UPDATE issues SET model=? WHERE id=?`, in.Model, *run.IssueID)
+	who := "human"
+	if u := userFrom(r); u != nil {
+		who = u.Username
+	}
+	s.addComment(*run.IssueID, who, fmt.Sprintf("🔄 Restarting the agent with model %s (was %s). Work so far stays on the branch.", firstNonEmpty(in.Model, "default"), firstNonEmpty(run.Model, "default")))
+	n, err := s.node(run.NodeID)
+	if err != nil || !n.Online {
+		s.finishRun(run.ID, proto.RunFinish{Status: "cancelled", Error: "restarted with another model"})
+	} else {
+		s.enqueue(run.NodeID, proto.Command{Type: "cancel", RunID: run.ID})
+	}
+	s.issueChanged(run.ProjectID)
+	w.WriteHeader(204)
 }
 
 func (s *Server) apiRunCancel(w http.ResponseWriter, r *http.Request) {

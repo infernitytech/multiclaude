@@ -286,9 +286,15 @@ func (s *Server) runnerEvents(w http.ResponseWriter, r *http.Request) {
 			SessionID string  `json:"session_id"`
 			Result    string  `json:"result"`
 			Cost      float64 `json:"total_cost_usd"`
+			Model     string  `json:"model"`
 		}
 		if json.Unmarshal(e.Data, &m) != nil {
 			continue
+		}
+		if m.Type == "system" && m.Subtype == "init" && m.Model != "" && m.Model != run.Model {
+			run.Model = m.Model
+			s.db.Exec(`UPDATE runs SET model=? WHERE id=?`, m.Model, id)
+			s.emit(event{Type: "runs", ProjectID: run.ProjectID})
 		}
 		if m.SessionID != "" && run.SessionID == "" {
 			run.SessionID = m.SessionID

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -257,6 +258,30 @@ func (s *Server) dispatchTool(c proto.AgentCall) (string, error) {
 		if b.Len() == 0 {
 			return "The chat is empty.", nil
 		}
+		return b.String(), nil
+
+	case "list_artifacts":
+		issue := ""
+		if n := intv("issue"); n > 0 {
+			issue = strconv.Itoa(n)
+		}
+		list, total, size := s.listArtifacts(p.ID, str("query"), str("prefix"), issue, 100)
+		if total == 0 {
+			return "No matching artifacts. Upload with: multiclaude artifact put <file-or-dir> [name] -m \"description\"", nil
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d artifact(s), %s in total%s:\n", total, humanBytes(size), map[bool]string{true: " (newest 100 shown)", false: ""}[total > len(list)])
+		for _, a := range list {
+			fmt.Fprintf(&b, "- %s  %s  %s by %s", a.Name, humanBytes(a.Size), time.UnixMilli(a.CreatedAt).Format("2006-01-02 15:04"), a.UploadedBy)
+			if a.IssueNumber > 0 {
+				fmt.Fprintf(&b, " (#%d)", a.IssueNumber)
+			}
+			if a.Description != "" {
+				b.WriteString(" — " + a.Description)
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("Download: multiclaude artifact get <name> [dest]")
 		return b.String(), nil
 
 	case "list_agents":

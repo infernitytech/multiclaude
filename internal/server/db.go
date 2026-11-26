@@ -132,7 +132,7 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	// A single connection serialises writes and makes claim transactions trivially atomic.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema + authSchema + repoSchema + questionSchema + agentCallSchema); err != nil {
+	if _, err := db.Exec(schema + authSchema + repoSchema + questionSchema + agentCallSchema + artifactSchema); err != nil {
 		return nil, err
 	}
 	// Additive migrations for databases created by older versions.
@@ -143,6 +143,9 @@ func openDB(path string) (*sql.DB, error) {
 		`ALTER TABLE nodes ADD COLUMN claude_account TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN pending_replies INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE questions ADD COLUMN call_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE issues ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return nil, fmt.Errorf("migration %q: %w", m, err)
@@ -190,13 +193,14 @@ type Project struct {
 	Dispatch      bool           `json:"dispatch"`
 	CreatedAt     int64          `json:"created_at"`
 	Counts        map[string]int `json:"counts"`
+	Model         string         `json:"model"` // default model for the project's sessions ("" = machine default)
 }
 
-const projectCols = `id,slug,name,description,default_branch,review_mode,instructions,dispatch,created_at`
+const projectCols = `id,slug,name,description,default_branch,review_mode,instructions,dispatch,created_at,model`
 
 func scanProject(r interface{ Scan(...any) error }) (*Project, error) {
 	p := &Project{}
-	err := r.Scan(&p.ID, &p.Slug, &p.Name, &p.Description, &p.DefaultBranch, &p.ReviewMode, &p.Instructions, &p.Dispatch, &p.CreatedAt)
+	err := r.Scan(&p.ID, &p.Slug, &p.Name, &p.Description, &p.DefaultBranch, &p.ReviewMode, &p.Instructions, &p.Dispatch, &p.CreatedAt, &p.Model)
 	return p, err
 }
 
@@ -213,6 +217,7 @@ type Issue struct {
 	DependsOn []int    `json:"depends_on"`
 	Assignee  string   `json:"assignee"`
 	RunID     string   `json:"run_id"`
+	Model     string   `json:"model"` // model for sessions on this issue ("" = project/machine default)
 	// OpenQuestions counts unanswered ask_human questions (filled for board/detail views).
 	OpenQuestions int `json:"open_questions,omitempty"`
 	// NoMachine: no worker assigned to the project can ever satisfy "requires" (board/list views).
@@ -227,13 +232,13 @@ type Issue struct {
 	Runs      []Run     `json:"runs"`
 }
 
-const issueCols = `id,project_id,number,title,body,status,priority,labels,requires,depends_on,assignee,run_id,attempts,branch,created_by,created_at,updated_at,sort`
+const issueCols = `id,project_id,number,title,body,status,priority,labels,requires,depends_on,assignee,run_id,attempts,branch,created_by,created_at,updated_at,sort,model`
 
 func scanIssue(r interface{ Scan(...any) error }) (*Issue, error) {
 	i := &Issue{}
 	var labels, req, deps string
 	err := r.Scan(&i.ID, &i.ProjectID, &i.Number, &i.Title, &i.Body, &i.Status, &i.Priority, &labels, &req, &deps,
-		&i.Assignee, &i.RunID, &i.Attempts, &i.Branch, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.Sort)
+		&i.Assignee, &i.RunID, &i.Attempts, &i.Branch, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.Sort, &i.Model)
 	i.Labels, i.Requires, i.DependsOn = parseStrs(labels), parseStrs(req), parseInts(deps)
 	return i, err
 }
@@ -342,9 +347,10 @@ type Run struct {
 	ProjectSlug string    `json:"project_slug,omitempty"`
 	Activity    *Activity `json:"activity,omitempty"` // live, in-memory (running runs only)
 	GPUs        []int     `json:"gpus"`               // GPU numbers reserved for this run
+	Model       string    `json:"model"`              // the model the session actually runs (from its init event)
 }
 
-const runSelect = `SELECT r.id,r.project_id,r.issue_id,r.node_id,r.kind,r.status,r.prompt,r.started_at,r.ended_at,r.session_id,r.cost_usd,r.result,r.error,r.completed,r.verdict,r.gpus,
+const runSelect = `SELECT r.id,r.project_id,r.issue_id,r.node_id,r.kind,r.status,r.prompt,r.started_at,r.ended_at,r.session_id,r.cost_usd,r.result,r.error,r.completed,r.verdict,r.gpus,r.model,
  COALESCE(n.name,''),COALESCE(i.number,0),COALESCE(i.title,''),COALESCE(p.slug,'')
  FROM runs r LEFT JOIN nodes n ON n.id=r.node_id LEFT JOIN issues i ON i.id=r.issue_id LEFT JOIN projects p ON p.id=r.project_id `
 
@@ -352,7 +358,7 @@ func scanRun(r interface{ Scan(...any) error }) (*Run, error) {
 	x := &Run{}
 	var gpus string
 	err := r.Scan(&x.ID, &x.ProjectID, &x.IssueID, &x.NodeID, &x.Kind, &x.Status, &x.Prompt, &x.StartedAt, &x.EndedAt, &x.SessionID,
-		&x.CostUSD, &x.Result, &x.Error, &x.Completed, &x.Verdict, &gpus, &x.NodeName, &x.IssueNumber, &x.IssueTitle, &x.ProjectSlug)
+		&x.CostUSD, &x.Result, &x.Error, &x.Completed, &x.Verdict, &gpus, &x.Model, &x.NodeName, &x.IssueNumber, &x.IssueTitle, &x.ProjectSlug)
 	json.Unmarshal([]byte(gpus), &x.GPUs)
 	return x, err
 }

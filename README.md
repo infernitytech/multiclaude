@@ -122,6 +122,28 @@ Auto-detected capabilities include:
 9. **Repositories & mirrors** (Settings) — see below.
 10. **Machines** shows each machine's Claude account and its live load, refreshed every 10 seconds: CPU, RAM, disk space over all local disks, and per-GPU utilisation and VRAM.
 11. **Subagents.** Every agent is told to parallelize independent work with subagents and to pick cheaper models where they suffice: haiku for searching and summarizing, sonnet for routine implementation, the main model for design and integration.
+12. **Models.** Agent tiles, the run view and the issue panel show which model each session runs. Choose the model per project (Settings → *Default model*) or per issue (issue panel → *Model*); the order is issue → project → the machine's model setting → Claude Code's default. **Switch now** on a running issue restarts its agent with another model: uncommitted work is saved to the branch as a WIP commit, no failed attempt is counted, and the new session continues from the branch. Agents can also set `model` when they create issues (e.g. haiku for mechanical work).
+13. **Artifacts.** Each project has an artifact store for files that don't belong in git: builds, datasets, model checkpoints, large generated files. See below.
+
+### Artifacts
+
+Agents are told to publish builds there as archives, never in git, named `builds/<project>-<version or issue-N>-<os>-<arch>.tar.gz` (or `.zip` for Windows), and to fetch inputs other agents produced from the store instead of rebuilding them. In an agent session:
+
+```sh
+multiclaude artifact put dist/game builds/game-1.2-linux-amd64 -m "release build of 3f2a1c"   # a directory is packed as .tar.gz
+multiclaude artifact get builds/game-1.2-linux-amd64.tar.gz out/ -x                       # -x extracts
+multiclaude artifact ls builds/
+multiclaude artifact rm datasets/old.parquet
+```
+
+- Uploads stream to disk with a SHA-256 checksum. Downloads resume and are verified.
+- An upload made by an agent is linked to its issue and noted there with 📦, and appears in the issue panel.
+- The same name replaces the previous file, so put the version or issue number in the name.
+- The **Artifacts** tab lists, searches, uploads (drag & drop) and downloads.
+- On an enrolled machine you can use the store yourself: `multiclaude-runner artifact get <name> --project <slug>`.
+- A machine can only access the projects it is assigned to.
+- Files live in `<data>/artifacts/<project-id>/`. The size limit per file is 100 GB; change it with `MC_ARTIFACT_MAX_GB`. Deleting a project moves its artifacts to the trash folder.
+- Behind a reverse proxy, allow large request bodies (e.g. nginx `client_max_body_size 0;`).
 
 ### Machines with several GPUs
 

@@ -233,6 +233,27 @@ function agentMessageBox(runId, onSent) {
   ta.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
   return h("div", { class: "row", style: { gap: "8px", alignItems: "flex-end" } }, ta, h("button", { class: "btn primary small", onclick: send }, "Send"));
 }
+// ---------- models ----------
+const MODELS = ["opus", "sonnet", "haiku", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"];
+function modelInput(value, placeholder, onchange) {
+  const id = "models-dl";
+  if (!document.getElementById(id)) document.body.appendChild(h("datalist", { id }, MODELS.map(m => h("option", { value: m }))));
+  return h("input", { list: id, value: value || "", placeholder, onchange: e => onchange(e.target.value.trim()) });
+}
+// "claude-sonnet-5-5[1m]" → "sonnet 5.5"
+const modelLabel = m => !m ? "" : m.replace(/^claude-/, "").replace(/\[.*\]$/, "").replace(/-(\d+)-(\d+)(-\d{8})?$/, " $1.$2");
+const modelChip = m => m ? h("span", { class: "chip model", title: m }, modelLabel(m)) : null;
+function switchModelModal(run, onDone) {
+  let model = run.issue_model || "";
+  const inp = modelInput(model, "model, e.g. opus, sonnet, haiku (empty = project default)", v => model = v);
+  inp.oninput = e => model = e.target.value.trim();
+  modal("Switch model", h("div", null,
+    h("p", { class: "hint", style: { marginTop: 0 } }, `The agent on #${run.issue_number} runs ${run.model || "the default model"}. Switching stops this session — uncommitted work is saved to the branch as a WIP commit, no failed attempt is counted — and a new session continues the issue with the chosen model (it is remembered on the issue).`),
+    inp),
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"),
+      h("button", { class: "btn primary", onclick: async () => { await api("POST", `/api/runs/${run.id}/restart`, { model }); close(); toast(`Restarting with ${model || "the default model"}…`); onDone && onDone(); } }, "Restart with this model")]);
+  setTimeout(() => inp.focus(), 0);
+}
 function messageAgentModal(runId, what, who) {
   let closeFn;
   const box = agentMessageBox(runId, () => closeFn && closeFn());
@@ -379,12 +400,12 @@ function runDot(r) {
 
 // ---------- project shell ----------
 function projectView(slug, tab, params) {
-  const tabs = [["board", "Board"], ["list", "List"], ["archive", "Archive"], ["chat", "Chat"], ["runs", "Runs"], ["code", "Code"], ["settings", "Settings"]];
+  const tabs = [["board", "Board"], ["list", "List"], ["archive", "Archive"], ["chat", "Chat"], ["runs", "Runs"], ["artifacts", "Artifacts"], ["code", "Code"], ["settings", "Settings"]];
   const head = h("div", { class: "topbar" });
   const body = h("div", { class: "content flush" });
   const el = h("div", { style: { display: "contents" } }, head, body);
   let inner;
-  const views = { board: boardView, list: (i, p) => listView(i, p, false), archive: (i, p) => listView(i, p, true), chat: chatView, runs: projectRunsView, code: codeView, settings: settingsView };
+  const views = { board: boardView, list: (i, p) => listView(i, p, false), archive: (i, p) => listView(i, p, true), chat: chatView, runs: projectRunsView, artifacts: artifactsView, code: codeView, settings: settingsView };
   function renderHead(info) {
     head.innerHTML = "";
     add(head, [
@@ -440,7 +461,7 @@ function agentTile(r) {
       h("span", { class: "chip " + (r.kind === "review" ? "req" : r.kind === "chat" ? "accent" : "") }, r.kind)),
     h("div", { class: "agent-task" }, r.issue_number ? `#${r.issue_number} ${r.issue_title}` : "chat session"),
     h("div", { class: "agent-now", "data-act": r.id }, actText(a)),
-    h("div", { class: "hint", "data-actmeta": r.id }, actMeta(r, a)));
+    h("div", { class: "row", style: { gap: "6px" } }, h("div", { class: "hint grow", "data-actmeta": r.id }, actMeta(r, a)), modelChip(r.model)));
 }
 function actMeta(r, a) {
   return `${dur(Date.now() - r.started_at)}` + (a ? ` · ${a.tools} tool calls · ${a.edits} edits` : "");
@@ -730,11 +751,27 @@ async function openIssue(slug, number, fromRoute) {
         h("div", { class: "k" }, "Labels"), listInput("labels", "e.g. backend, ui"),
         h("div", { class: "k", title: "Only machines with all these capabilities can claim the issue" }, "Requires"), listInput("requires", "capabilities, e.g. gpu, gpus:2, vram:48, docker"),
         h("div", { class: "k" }, "Depends on"), listInput("depends_on", "issue numbers, e.g. 3, 7"),
+        h("div", { class: "k", title: "Claude model for this issue's sessions. Empty = project default, then the machine's setting." }, "Model"),
+        (() => {
+          const cur = i.run_id && (i.runs || []).find(r => r.id === i.run_id);
+          const inp = modelInput(i.model, `default${projectBySlug(slug)?.model ? " (" + projectBySlug(slug).model + ")" : ""}`, v => save({ model: v }).then(render));
+          inp.dataset.f = "model";
+          return h("div", { class: "row", style: { gap: "8px" } }, inp,
+            cur && cur.model ? h("span", { class: "hint", style: { whiteSpace: "nowrap" } }, "running ", modelChip(cur.model)) : null,
+            cur ? h("button", { class: "btn small", style: { whiteSpace: "nowrap" }, onclick: () => switchModelModal({ ...cur, issue_model: i.model }, load) }, "Switch now") : null);
+        })(),
         h("div", { class: "k" }, "Branch"), h("div", { class: "mono hint" }, i.branch || `issue-${i.number} (when started)`),
         h("div", { class: "k" }, "Created"), h("div", { class: "hint" }, `${ago(i.created_at)} by ${i.created_by}`)),
       i.open_questions ? h("div", { class: "card pad", style: { borderLeft: "3px solid var(--warn)", marginBottom: "12px" } }, `❓ The agent asked ${i.open_questions > 1 ? i.open_questions + " questions" : "a question"} about this issue. `, link("/questions", "Answer it →")) : null,
       i.run_id ? h("div", { class: "card pad agent-msg-card" }, h("div", { class: "hint", style: { marginBottom: "6px" } }, `💬 Message ${i.assignee} — injected straight into its running session`), agentMessageBox(i.run_id)) : null,
       desc,
+      (() => {
+        const box = h("div");
+        api("GET", `/api/projects/${slug}/artifacts?issue=${i.number}`).then(r => {
+          if (r.items.length) add(box, [h("div", { class: "section-title" }, `Artifacts (${r.items.length})`), artifactTable(slug, r.items, null)]);
+        }).catch(() => {});
+        return box;
+      })(),
       i.runs?.length ? [h("div", { class: "section-title" }, "Agent runs"), runTable(i.runs.slice(0, 8), false)] : null,
       h("div", { class: "section-title" }, "Activity"),
       (i.comments || []).map(c => {
@@ -845,6 +882,80 @@ function projectRunsView(info) {
   return { el, load, onEvent: debounce(ev => { if (ev.type === "runs") load(); }, 300) };
 }
 
+// ---------- artifacts ----------
+const fmtBytes = n => n >= 1 << 30 ? (n / (1 << 30)).toFixed(1) + " GB" : n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B";
+const artifactURL = (slug, name) => `/api/projects/${encodeURIComponent(slug)}/artifacts/` + name.split("/").map(encodeURIComponent).join("/");
+
+function artifactTable(slug, items, onDelete) {
+  return h("table", { class: "list" },
+    h("tr", null, h("th", null, "Name"), h("th", null, "Size"), h("th", null, "Uploaded by"), h("th", null, "Issue"), h("th", null, "When"), h("th", null, "⇩"), h("th", null, "")),
+    items.map(a => h("tr", null,
+      h("td", null, h("a", { href: artifactURL(slug, a.name), download: "", class: "mono", title: `sha256 ${a.sha256}` }, a.name), a.description ? h("div", { class: "hint" }, a.description) : null),
+      h("td", { class: "mono", style: { whiteSpace: "nowrap" } }, fmtBytes(a.size)),
+      h("td", null, a.uploaded_by),
+      h("td", null, a.issue_number ? link(`/p/${slug}/i/${a.issue_number}`, `#${a.issue_number}`) : ""),
+      h("td", { class: "hint", style: { whiteSpace: "nowrap" } }, ago(a.created_at)),
+      h("td", { class: "hint" }, a.downloads || ""),
+      h("td", null, h("div", { class: "row", style: { gap: "4px", flexWrap: "nowrap" } },
+        h("button", { class: "btn small ghost", title: "Copy the command to fetch it on a machine", onclick: () => copy(`multiclaude artifact get ${a.name}`) }, "cmd"),
+        onDelete && h("button", { class: "btn small ghost danger", onclick: () => { if (confirm(`Delete ${a.name}? This can't be undone.`)) onDelete(a); } }, "✕"))))));
+}
+
+function artifactsView(info, params) {
+  const slug = info.project.slug;
+  const el = h("div", { class: "content" });
+  let q = params.get("q") || "";
+  const results = h("div");
+  const usage = h("span", { class: "hint" });
+  const search = h("input", { placeholder: "Search artifacts…  (name, description, uploader)", value: q, style: { maxWidth: "340px" },
+    oninput: debounce(e => { q = e.target.value.trim(); history.replaceState(null, "", `/p/${slug}/artifacts${q ? "?q=" + encodeURIComponent(q) : ""}`); load(); }, 250) });
+  const fileIn = h("input", { type: "file", multiple: true, style: { display: "none" }, onchange: () => upload([...fileIn.files]) });
+  const prefixIn = h("input", { placeholder: "folder, e.g. builds/ (optional)", style: { maxWidth: "220px" } });
+  const descIn = h("input", { placeholder: "description (optional)", style: { maxWidth: "260px" } });
+  const prog = h("div", { class: "hint" });
+  const drop = h("div", { class: "card pad drop-zone" },
+    h("div", { class: "row wrap", style: { gap: "8px" } },
+      h("button", { class: "btn primary", onclick: () => fileIn.click() }, "⇧ Upload files"), prefixIn, descIn,
+      h("span", { class: "hint" }, "or drop files here"), fileIn),
+    prog);
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("drop"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("drop"));
+  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("drop"); upload([...e.dataTransfer.files]); });
+
+  function upload(files) {
+    if (!files.length) return;
+    let prefix = prefixIn.value.trim().replace(/^\/+/, "");
+    if (prefix && !prefix.endsWith("/")) prefix += "/";
+    const next = () => {
+      const f = files.shift();
+      if (!f) { prog.textContent = ""; fileIn.value = ""; load(); return; }
+      const name = prefix + f.name;
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", artifactURL(slug, name) + (descIn.value.trim() ? "?description=" + encodeURIComponent(descIn.value.trim()) : ""));
+      xhr.upload.onprogress = e => { if (e.lengthComputable) prog.textContent = `Uploading ${name}: ${fmtBytes(e.loaded)} / ${fmtBytes(e.total)} (${Math.round(100 * e.loaded / e.total)}%)`; };
+      xhr.onload = () => { if (xhr.status >= 300) { let m = xhr.statusText; try { m = JSON.parse(xhr.responseText).error; } catch {} toast(`${name}: ${m}`, true); } else toast(`Uploaded ${name}`); next(); };
+      xhr.onerror = () => { toast(`${name}: upload failed`, true); next(); };
+      xhr.send(f);
+    };
+    next();
+  }
+  async function load() {
+    const r = await api("GET", `/api/projects/${slug}/artifacts${q ? "?q=" + encodeURIComponent(q) : ""}`);
+    usage.textContent = `${r.total} artifact${r.total === 1 ? "" : "s"} · ${fmtBytes(r.total_size)}${r.total > r.items.length ? ` · newest ${r.items.length} shown` : ""}`;
+    results.innerHTML = "";
+    results.appendChild(r.items.length ? artifactTable(slug, r.items, async a => { await api("DELETE", artifactURL(slug, a.name)); toast("Deleted"); load(); })
+      : h("div", { class: "card empty" }, q ? "No artifacts match." : ["No artifacts yet. Agents upload builds and large files with ", h("code", null, "multiclaude artifact put"), "; you can upload here too."]));
+  }
+  add(el, [
+    h("p", { class: "hint", style: { marginTop: 0 } }, "Builds, datasets, checkpoints and other large files outside git. Agents use ", h("code", null, "multiclaude artifact put/get/ls"),
+      " in their sessions; on an enrolled machine you can too: ", h("code", null, `multiclaude-runner artifact get <name> --project ${slug}`), "."),
+    drop,
+    h("div", { class: "row", style: { margin: "14px 0 8px", gap: "12px" } }, search, usage),
+    results,
+  ]);
+  return { el, load, onEvent: debounce(ev => { if (ev.type === "artifacts") load(); }, 300) };
+}
+
 const toolSummary = (name, input) => {
   input = input || {};
   const n = name.replace(/^mcp__multiclaude__/, "⧉ ");
@@ -913,7 +1024,9 @@ function runView(id) {
       h("h1", null, run.kind === "chat" ? "Chat session" : `${run.kind === "review" ? "Review" : "Work"} · #${run.issue_number} ${run.issue_title}`),
       runDot(run),
       h("span", { class: "sub" }, `agent ${run.node_name}/${run.id.slice(0, 6)} · ${run.project_slug}`),
+      modelChip(run.model),
       h("div", { class: "spacer" }),
+      run.status === "running" && run.issue_number && h("button", { class: "btn small", onclick: () => switchModelModal(run) }, "Switch model"),
       run.issue_number ? link(`/p/${run.project_slug}/i/${run.issue_number}`, "Open issue") : link(`/p/${run.project_slug}/chat`, "Project chat"),
       run.status === "running" && h("button", { class: "btn danger small", onclick: () => api("POST", `/api/runs/${id}/cancel`).then(() => toast("Cancelling…")) }, "Cancel run"),
     ]);
@@ -1154,6 +1267,9 @@ function settingsView(info) {
   const review = h("select", null, [["agent", "Agent review — reviewer machines review, approved work is auto-merged"], ["human", "Human review — you approve & merge on the board"], ["none", "No review — merge as soon as the worker completes"]]
     .map(([v, n]) => h("option", { value: v, selected: p.review_mode === v }, n)));
   const dispatch = h("input", { type: "checkbox", checked: p.dispatch });
+  let projModel = p.model || "";
+  const modelIn = modelInput(projModel, "machine default (e.g. opus, sonnet)", v => projModel = v);
+  modelIn.oninput = e => projModel = e.target.value.trim();
   const nodes = checkGroup(S.overview.nodes.map(n => [n.id, `${n.online ? "●" : "○"} ${n.name}`]), info.nodes, async (id, on) => {
     await api(on ? "PUT" : "DELETE", `/api/nodes/${id}/projects/${p.slug}`);
     toast(on ? "Machine assigned" : "Machine unassigned");
@@ -1165,10 +1281,11 @@ function settingsView(info) {
       h("label", { class: "field" }, h("span", null, "Description"), desc),
       h("label", { class: "field" }, h("span", null, "Instructions for agents"), instr),
       h("label", { class: "field" }, h("span", null, "Review mode"), review),
+      h("label", { class: "field" }, h("span", null, "Default model"), modelIn, h("span", { class: "hint" }, "Used for this project's sessions unless an issue sets its own. Empty = each machine's model setting (or Claude Code's default).")),
       h("label", { class: "toggle" }, dispatch, "Dispatch issues to machines automatically (uncheck to pause the project)"),
       h("div", { class: "row", style: { justifyContent: "flex-end", marginTop: "12px" } },
         h("button", { class: "btn primary", onclick: async () => {
-          await api("PATCH", `/api/projects/${p.slug}`, { name: name.value, description: desc.value, instructions: instr.value, review_mode: review.value, dispatch: dispatch.checked });
+          await api("PATCH", `/api/projects/${p.slug}`, { name: name.value, description: desc.value, instructions: instr.value, review_mode: review.value, dispatch: dispatch.checked, model: projModel });
           toast("Saved"); loadOverview();
         } }, "Save"))),
     h("div", { class: "section-title" }, "Repositories & mirrors"),

@@ -244,6 +244,11 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/projects/{slug}/repo/blob", s.apiBlob)
 	m.HandleFunc("GET /api/projects/{slug}/repo/log", s.apiLog)
 	m.HandleFunc("GET /api/projects/{slug}/repo/commit", s.apiCommit)
+	m.HandleFunc("GET /api/projects/{slug}/artifacts", s.apiArtifacts)
+	m.HandleFunc("PUT /api/projects/{slug}/artifacts/{name...}", s.apiPutArtifact)
+	m.HandleFunc("GET /api/projects/{slug}/artifacts/{name...}", s.apiGetArtifact)
+	m.HandleFunc("HEAD /api/projects/{slug}/artifacts/{name...}", s.apiGetArtifact)
+	m.HandleFunc("DELETE /api/projects/{slug}/artifacts/{name...}", s.apiDeleteArtifact)
 	m.HandleFunc("GET /api/questions", s.apiQuestions)
 	m.HandleFunc("POST /api/questions/{id}/answer", s.apiAnswerQuestion)
 	m.HandleFunc("GET /api/nodes", s.apiNodes)
@@ -255,6 +260,7 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/runs/{id}/events", s.apiRunEvents)
 	m.HandleFunc("POST /api/runs/{id}/message", s.apiRunMessage)
 	m.HandleFunc("POST /api/runs/{id}/cancel", s.apiRunCancel)
+	m.HandleFunc("POST /api/runs/{id}/restart", s.apiRunRestart)
 
 	// Runner API
 	m.HandleFunc("POST /api/runner/register", s.runnerRegister)

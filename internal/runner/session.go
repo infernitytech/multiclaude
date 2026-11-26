@@ -464,6 +464,9 @@ func (s *session) runClaude(messages []string) error {
 		"MULTICLAUDE_SERVER="+s.r.cfg.Server,
 		"MULTICLAUDE_PROJECT="+s.a.ProjectSlug,
 	)
+	// The artifact CLI (`multiclaude artifact …`) authenticates with the machine token.
+	cmd.Env = append(cmd.Env, "MC_TOKEN="+s.r.token,
+		"PATH="+filepath.Join(s.r.cfg.WorkDir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if os.Getenv("MCP_TOOL_TIMEOUT") == "" {
 		cmd.Env = append(cmd.Env, "MCP_TOOL_TIMEOUT=1980000") // ask_human waits up to 30 min
 	}

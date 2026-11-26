@@ -110,6 +110,14 @@ func New(cfg Config) (*Runner, error) {
 	if creds.Token != "" {
 		r.nodeID, r.token = creds.NodeID, creds.Token
 	}
+	// `multiclaude artifact …` in agent shells: a link to this binary on the session's PATH.
+	bin := filepath.Join(cfg.WorkDir, "bin")
+	os.MkdirAll(bin, 0o755)
+	link := filepath.Join(bin, "multiclaude")
+	os.Remove(link)
+	if err := os.Symlink(self, link); err != nil {
+		log.Printf("could not create %s: %v", link, err)
+	}
 	return r, nil
 }
 

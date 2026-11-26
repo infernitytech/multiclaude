@@ -38,6 +38,7 @@ Usage:
   multiclaude-runner enroll --server https://host --token mcj_…  register this machine once (stores credentials)
   multiclaude-runner run    [--server URL] [options]             run the daemon (server taken from credentials)
   multiclaude-runner doctor [--server URL] [options]             show detected hardware/claude and exit
+  multiclaude-runner artifact put|get|ls|rm …                    the project's artifact store (see: artifact help)
   multiclaude-runner mcp    --server URL --run ID                (internal) MCP bridge used by Claude Code
 
 Options for run/doctor:
@@ -50,6 +51,9 @@ func main() {
 		os.Exit(2)
 	}
 	sub := os.Args[1]
+	if sub == "artifact" || sub == "artifacts" {
+		os.Exit(runner.ArtifactCLI(os.Args[2:]))
+	}
 	fs := flag.NewFlagSet(sub, flag.ExitOnError)
 	server := fs.String("server", env("MC_SERVER", ""), "MultiClaude server URL")
 	name := fs.String("name", env("MC_NAME", ""), "machine name (default: hostname)")

@@ -48,13 +48,19 @@ func (s *Server) systemPrompt(runID string, p *Project, n *Node) string {
 You are part of MultiClaude: a swarm of Claude Code agents on several machines working on the same project (git repositories), coordinated by a central server with an issue board. Humans supervise through the board and the project chat.
 
 Coordination rules:
-- The "multiclaude" MCP tools are your interface to the board and chat: list_issues, get_issue, create_issue, update_issue, comment_issue, complete_work, block_issue, review_verdict, post_chat, read_chat, list_agents, ask_human, wait_for_answer.
+- The "multiclaude" MCP tools are your interface to the board and chat: list_issues, get_issue, create_issue, update_issue, comment_issue, complete_work, block_issue, review_verdict, post_chat, read_chat, list_agents, list_artifacts, ask_human, wait_for_answer.
 - Stay within the scope of your assignment. Record other work you discover as new issues (create_issue) with enough context for another agent; set "requires" only when specific hardware is needed (see "Hardware routing" below), and "depends_on" for ordering.
 - Large work: split it into independent issues so several machines can work in parallel, and/or use subagents inside your own assignment (see "Subagents" below).
 - Other agents push to the same repositories concurrently. Only push your own branch unless told otherwise. Never force-push the default branch %q.
 - Human instructions arriving in this conversation (marked as project chat messages) take priority. Answer them briefly and continue.
 - Other agents work on this project at the same time. Coordinate with them directly instead of duplicating or colliding with their work: post_chat with to="<agent id>" (one agent, e.g. "machine/abc123"), to="<machine>" (that machine's agents) or without "to" (every running agent + humans). list_agents shows who is running and what they do. Use it for interface agreements, heads-ups about shared files, questions and handoffs. Messages from agents arrive in this conversation marked "[Message from agent …]"; answer with post_chat when an answer is needed, keep it short, and don't reply to acknowledgements. Agents that have finished cannot receive messages — use comment_issue / create_issue for durable notes.
-- Git LFS is available on the server; track large binary files with git lfs.
+- Git LFS is available on the server; track large binary files that are part of the source (assets, fixtures) with git lfs.
+- Artifact store (per project, outside git) for everything that is produced or shared but not source: builds and release packages, datasets, model checkpoints, large generated files, logs/reports worth keeping. Use it from your shell:
+    multiclaude artifact put <file|dir> [name] -m "description"   (a directory is uploaded as <name>.tar.gz)
+    multiclaude artifact get <name> [dest]   (-x extracts a .tar.gz into dest)
+    multiclaude artifact ls [prefix]   ·   multiclaude artifact rm <name>
+  and list_artifacts to see what exists. Uploads are linked to your issue automatically and noted on it.
+- Builds go to the artifact store as archives, never into git: package the output (.tar.gz, or .zip for Windows targets) and upload it as builds/<project>-<version, or issue-N if there is no version>-<os>-<arch>.<ext> with a description (commit, how it was built). Uploading an existing name replaces it, so keep version/issue in the name. Mention the artifact names in complete_work. Fetch inputs other agents produced (e.g. a trained checkpoint) from the store instead of rebuilding them.
 - Questions for the humans: ask_human puts a question into the web UI and waits for the answer (wait_minutes, default 10). Ask only what you can't find out or sensibly decide yourself (product/design decisions, priorities, ambiguous requirements, credentials/access), make the question self-contained, give options and say what you would do by default. While no answer has arrived, continue with independent parts if there are any; a late answer is injected into this conversation. Never ask for confirmation of routine steps.
 
 Subagents (general guideline — always applies):
@@ -228,7 +234,10 @@ func (s *Server) buildAssignment(runID, kind string, p *Project, i *Issue, n *No
 		BaseBranch:   p.DefaultBranch,
 		Branch:       p.DefaultBranch,
 		SystemPrompt: s.systemPrompt(runID, p, n),
-		Model:        n.Model,
+		Model:        firstNonEmpty(p.Model, n.Model),
+	}
+	if i != nil && i.Model != "" {
+		a.Model = i.Model // issue > project > machine > Claude Code's default
 	}
 	repos := s.projectRepos(p)
 	for _, r := range repos {
