@@ -68,10 +68,13 @@ type Repo struct {
 }
 
 type Mirror struct {
-	ID         int64  `json:"id"`
-	RepoID     int64  `json:"repo_id"`
-	URL        string `json:"url"`
-	Mode       string `json:"mode"`       // default (default branch + tags, fast-forward only) | all (every branch & tag, forced)
+	ID     int64  `json:"id"`
+	RepoID int64  `json:"repo_id"`
+	URL    string `json:"url"`
+	// sync: two-way on the default branch (pull GitHub's new commits, push ours) + tags
+	// default: push the default branch + tags, fast-forward only
+	// all: push every branch & tag, forced
+	Mode       string `json:"mode"`
 	Visibility string `json:"visibility"` // public | private | unknown
 	Enabled    bool   `json:"enabled"`
 	HasToken   bool   `json:"has_token"`
@@ -210,14 +213,15 @@ func (s *Server) apiCreateRepo(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "a repository with that name already exists")
 		return
 	}
-	if in.DefaultBranch == "" {
+	if in.DefaultBranch == "" && strings.TrimSpace(in.ImportURL) == "" {
 		in.DefaultBranch = "main"
 	}
 	key := repoKey(p.Slug, in.Name, false)
-	if err := s.createRepoAuth(key, in.Name, in.Description, in.DefaultBranch, strings.TrimSpace(in.ImportURL), firstNonEmpty(in.ImportToken, s.setting("github_token"))); err != nil {
+	if err := s.createRepoAuth(key, in.Name, in.Description, in.DefaultBranch, strings.TrimSpace(in.ImportURL), s.tokenFor(normalizeImport(in.ImportURL), in.ImportToken)); err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	in.DefaultBranch = s.headBranch(key, in.DefaultBranch)
 	s.db.Exec(`INSERT INTO repos(project_id,name,description,default_branch,is_primary,created_at) VALUES(?,?,?,?,0,?)`,
 		p.ID, in.Name, in.Description, in.DefaultBranch, now())
 	s.emit(event{Type: "repos", ProjectID: p.ID})
@@ -302,10 +306,10 @@ func (s *Server) apiCreateMirror(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "mirror URL must be https://… (or owner/name for GitHub) without credentials in it — put the token in the token field")
 		return
 	}
-	if in.Mode != "all" {
-		in.Mode = "default"
+	if in.Mode != "all" && in.Mode != "default" {
+		in.Mode = "sync"
 	}
-	tok := firstNonEmpty(in.Token, s.setting("github_token"))
+	tok := s.tokenFor(u, in.Token)
 	if in.Create {
 		if err := ensureGitHubRepo(r.Context(), u, tok, in.Private, rp.Description); err != nil {
 			httpErr(w, 400, err.Error())
@@ -352,7 +356,7 @@ func (s *Server) apiUpdateMirror(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	if in.Mode != nil && (*in.Mode == "all" || *in.Mode == "default") {
+	if in.Mode != nil && (*in.Mode == "all" || *in.Mode == "default" || *in.Mode == "sync") {
 		s.db.Exec(`UPDATE mirrors SET mode=? WHERE id=?`, *in.Mode, m.ID)
 	}
 	if in.Enabled != nil {
@@ -494,7 +498,7 @@ func (s *Server) syncMirror(id int64) {
 		branch = pBranch
 	}
 	key := repoKey(slug, name, primary)
-	tok := firstNonEmpty(m.token, s.setting("github_token"))
+	tok := s.tokenFor(m.URL, m.token)
 
 	// Refresh the visibility now and then (unauthenticated: 200 = public).
 	if m.Visibility == "unknown" || time.Since(time.UnixMilli(m.LastAt)) > time.Hour {
@@ -506,6 +510,15 @@ func (s *Server) syncMirror(id int64) {
 	args := []string{"--git-dir", s.repoPath(key)}
 	if tok != "" {
 		args = append(args, "-c", "http.extraHeader=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+tok)))
+	}
+	if m.Mode == "sync" {
+		if err := s.pullMirror(id, pid, key, name, primary, branch, m.URL, args); err != nil {
+			msg := mirrorError(err.Error(), tok)
+			log.Printf("mirror %s ← %s: %s", key, redactURL(m.URL), msg)
+			s.db.Exec(`UPDATE mirrors SET last_status='error', last_error=?, last_at=? WHERE id=?`, msg, now(), id)
+			s.emit(event{Type: "repos", ProjectID: pid})
+			return
+		}
 	}
 	args = append(args, "push", "--porcelain")
 	if m.Mode == "all" {
@@ -533,7 +546,7 @@ func mirrorError(out, tok string) string {
 	}
 	switch {
 	case strings.Contains(out, "non-fast-forward") || strings.Contains(out, "[rejected]") || strings.Contains(out, "fetch first"):
-		return "rejected: the mirror has commits that are not on this server. Mirrors are one-way (MultiClaude → GitHub); switch the mirror to \"all branches (forced)\" or reset the GitHub repo."
+		return "rejected: the mirror has commits that are not on this server. Switch the mirror to \"two-way sync\" to bring them in, or to \"all branches (forced)\" to overwrite them."
 	case strings.Contains(out, "Authentication failed") || strings.Contains(out, "403") || strings.Contains(out, "could not read Username"):
 		return "authentication failed: set a GitHub token with Contents: read & write for this repository"
 	case strings.Contains(out, "not found"):
@@ -657,9 +670,133 @@ func ensureGitHubRepo(ctx context.Context, u, tok string, private bool, descript
 
 // createRepoAuth is createRepo with an optional token for importing a private repo.
 func (s *Server) createRepoAuth(key, name, description, branch, importURL, tok string) error {
-	if importURL != "" && tok != "" && strings.HasPrefix(importURL, "https://github.com/") {
+	importURL = normalizeImport(importURL)
+	if importURL != "" && tok != "" && strings.HasPrefix(importURL, "https://") {
 		hdr := "http.extraHeader=Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+tok))
 		return s.createRepoWith(key, name, description, branch, importURL, []string{"-c", hdr})
 	}
 	return s.createRepoWith(key, name, description, branch, importURL, nil)
+}
+
+// headBranch returns the repository's actual default branch (imports adopt the
+// upstream one), falling back to want.
+func (s *Server) headBranch(key, want string) string {
+	if b, err := s.gitStr(key, "symbolic-ref", "--short", "HEAD"); err == nil && b != "" {
+		return b
+	}
+	if want == "" {
+		return "main"
+	}
+	return want
+}
+
+// pullMirror brings commits made directly on the mirror (e.g. pull requests
+// merged on GitHub) into the server's default branch before pushing: a
+// fast-forward when the server has nothing new, otherwise a merge commit. If
+// both sides conflict, GitHub's state is put on branch upstream/<branch> and an
+// issue asks an agent to merge it; until then the push is held back.
+func (s *Server) pullMirror(id, pid int64, key, name string, primary bool, branch, url string, gitArgs []string) error {
+	ref := fmt.Sprintf("refs/mirrors/%d/%s", id, branch)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append(append([]string{}, gitArgs...), "fetch", "--no-tags", "--quiet", url, "+refs/heads/"+branch+":"+ref)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		o := string(out)
+		if strings.Contains(o, "couldn't find remote ref") {
+			return nil // empty or new mirror: nothing to pull
+		}
+		return fmt.Errorf("fetch: %s", o)
+	}
+	theirs, err := s.gitStr(key, "rev-parse", "--verify", ref)
+	if err != nil {
+		return nil
+	}
+	host := mirrorHost(url)
+	if _, err := s.gitStr(key, "merge-base", "refs/heads/"+branch, theirs); err != nil {
+		return fmt.Errorf("unrelated histories: %s's %s does not share any history with this repository. Import the repository from there instead of creating it here, or use an empty mirror repository", host, branch)
+	}
+	pl, err := s.planMergeSHA(key, branch, theirs, fmt.Sprintf("Merge %s from %s", branch, strings.TrimSuffix(url, ".git")))
+	if errors.Is(err, errConflict) {
+		up := "upstream/" + branch
+		s.gitStr(key, "update-ref", "refs/heads/"+up, theirs)
+		repo := ""
+		if !primary {
+			repo = fmt.Sprintf(" in repository `%s`", name)
+		}
+		title := fmt.Sprintf("Merge changes from %s into %s%s", host, branch, strings.ReplaceAll(repo, "`", ""))
+		var exists int
+		s.db.QueryRow(`SELECT COUNT(*) FROM issues WHERE project_id=? AND title=? AND status NOT IN ('done')`, pid, title).Scan(&exists)
+		if exists == 0 {
+			s.createSystemIssue(pid, title, fmt.Sprintf("Commits were made directly on the mirror %s (branch `%s`) that conflict with work merged here%s. Their state is on branch `%s` on the server.\n\nMerge `%s` into this issue's branch, resolve the conflicts keeping both sides' intent, run the tests and complete the issue. Once it is merged, the server pushes the result back to %s.",
+				strings.TrimSuffix(url, ".git"), branch, repo, up, up, host))
+		}
+		return fmt.Errorf("diverged: %s and this server both changed %s in conflicting ways. Their state is on branch %s here and an issue was created to merge it; pushing resumes after that.", host, branch, up)
+	}
+	if err != nil {
+		return err
+	}
+	// A conflict branch from an earlier sync is obsolete once it's merged.
+	if up, err := s.gitStr(key, "rev-parse", "--verify", "refs/heads/upstream/"+branch); err == nil {
+		if _, err := s.gitStr(key, "merge-base", "--is-ancestor", up, pl.newSHA); err == nil {
+			s.gitStr(key, "update-ref", "-d", "refs/heads/upstream/"+branch)
+		}
+	}
+	if pl.noop {
+		return nil
+	}
+	n, _ := s.gitStr(key, "rev-list", "--count", pl.baseSHA+".."+theirs)
+	if err := s.applyMerge(pl); err != nil {
+		return err
+	}
+	where := branch
+	if !primary {
+		where = name + "/" + branch
+	}
+	s.postMessage(pid, "multiclaude", "", fmt.Sprintf("⬇ Pulled %s new commit(s) from %s into `%s`. Agents: merge `%s` into your branch if you touch the same code.", n, strings.TrimSuffix(url, ".git"), where, branch))
+	return nil
+}
+
+func mirrorHost(u string) string {
+	if strings.Contains(u, "github.com") {
+		return "GitHub"
+	}
+	return redactURL(u)
+}
+
+// createSystemIssue files a high-priority todo issue on behalf of the server.
+func (s *Server) createSystemIssue(pid int64, title, body string) {
+	p, err := s.projectByID(pid)
+	if err != nil {
+		return
+	}
+	st, pr, labels := "todo", json.RawMessage(`"high"`), []string{"upstream"}
+	if _, err := s.createIssue(p, issueInput{Title: &title, Body: &body, Status: &st, Priority: &pr, Labels: &labels}, "multiclaude"); err != nil {
+		log.Printf("create issue %q: %v", title, err)
+	}
+}
+
+// tokenFor picks the credential for a remote: an explicitly given token is used
+// for any host; the server-wide GitHub token only ever goes to github.com.
+func (s *Server) tokenFor(remote, explicit string) string {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return explicit
+	}
+	if u, err := url.Parse(strings.TrimSpace(remote)); err == nil && u.Scheme == "https" && strings.EqualFold(u.Host, "github.com") {
+		return s.setting("github_token")
+	}
+	return ""
+}
+
+// normalizeImport turns GitHub shorthand ("owner/name", github.com/owner/name)
+// into a clone URL; anything else is returned unchanged.
+func normalizeImport(u string) string {
+	u = strings.TrimSpace(u)
+	if u == "" || (strings.Contains(u, "://") && !strings.HasPrefix(u, "https://github.com/")) || strings.HasPrefix(u, "git@") {
+		return u
+	}
+	if m := ghRe.FindStringSubmatch(u); m != nil {
+		return "https://github.com/" + m[1] + "/" + m[2] + ".git"
+	}
+	return u
 }

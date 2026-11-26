@@ -92,15 +92,18 @@ func (s *Server) createRepoWith(slug, name, description, branch, importURL strin
 		if err := configureRepo(path); err != nil {
 			return err
 		}
-		// Make sure the configured default branch exists.
-		if _, err := s.gitStr(slug, "rev-parse", "--verify", "refs/heads/"+branch); err != nil {
+		// The configured default branch must exist. If none was given (or it's
+		// missing) adopt the imported repository's own default branch — never
+		// invent a new one, or mirrors would push a stray branch upstream.
+		if _, err := s.gitStr(slug, "rev-parse", "--verify", "refs/heads/"+branch); branch == "" || err != nil {
 			head, err2 := s.gitStr(slug, "symbolic-ref", "--short", "HEAD")
 			if err2 != nil {
-				return fmt.Errorf("imported repo has no branch %q", branch)
+				return fmt.Errorf("imported repo has no default branch")
 			}
-			if _, err := s.gitStr(slug, "branch", branch, head); err != nil {
-				return err
+			if _, err := s.gitStr(slug, "rev-parse", "--verify", "refs/heads/"+head); err != nil {
+				return fmt.Errorf("imported repo is empty")
 			}
+			branch = head
 		}
 		s.gitStr(slug, "symbolic-ref", "HEAD", "refs/heads/"+branch)
 		go s.importLFS(slug, importURL, gitOpts)
@@ -236,6 +239,19 @@ func (s *Server) planMerge(slug, base, branch, message string) (*mergePlan, erro
 	if err != nil {
 		return nil, errNoBranch
 	}
+	return s.planMergeFrom(slug, base, baseSHA, headSHA, message)
+}
+
+// planMergeSHA plans merging an arbitrary commit into base.
+func (s *Server) planMergeSHA(slug, base, headSHA, message string) (*mergePlan, error) {
+	baseSHA, err := s.gitStr(slug, "rev-parse", "--verify", "refs/heads/"+base)
+	if err != nil {
+		return nil, fmt.Errorf("base branch %s missing: %v", base, err)
+	}
+	return s.planMergeFrom(slug, base, baseSHA, headSHA, message)
+}
+
+func (s *Server) planMergeFrom(slug, base, baseSHA, headSHA, message string) (*mergePlan, error) {
 	pl := &mergePlan{key: slug, base: base, baseSHA: baseSHA}
 	if _, err := s.gitStr(slug, "merge-base", "--is-ancestor", headSHA, baseSHA); err == nil {
 		pl.noop, pl.newSHA = true, baseSHA // already merged / no commits

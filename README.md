@@ -144,8 +144,12 @@ A project starts with one repository, `/git/<slug>.git`. Add more under *Setting
 Each repository can have mirrors: one-way copies the server pushes to after every push and merge (and retries every 10 minutes). Agents are told about them and never push to them directly.
 
 - **Target**: `owner/name` (GitHub) or any `https://…git` URL. MultiClaude can create the GitHub repository for you, private or public.
-- **Credentials**: a server-wide GitHub token (*Users & account → GitHub*) or a token per mirror. Fine-grained tokens need *Contents: read & write*, plus *Administration: read & write* to create repositories.
-- **Mode**: *default branch + tags* (fast-forward only, safe for repos others also use), or *all branches & tags* (forced, prunes what was deleted here).
+- **Credentials**: a server-wide GitHub token (*Users & account → GitHub*; only ever sent to github.com) or a token per mirror/import. Fine-grained tokens need *Contents: read & write*, plus *Administration: read & write* to create repositories.
+- **Mode**:
+  - *two-way sync* (default): before every push the server fetches the mirror's default branch. New commits there (e.g. pull requests merged on GitHub) are fast-forwarded or merged in, and announced in the project chat. If both sides conflict, the mirror's state is put on branch `upstream/<branch>` and a high-priority issue asks an agent to merge it; pushing resumes once that is merged.
+  - *push only*: default branch + tags, fast-forward only; fails if the mirror has commits the server doesn't.
+  - *push all (forced)*: every branch and tag, overwriting the mirror.
+- **Taking over an existing GitHub project**: create the project with *Import existing git repository* = `owner/name` and a token, and leave *Keep it in sync both ways* checked. History, branches, tags and LFS objects are imported, the default branch is taken over, and the GitHub repository stays the public face of the project. Add further repositories (e.g. a private enterprise one) the same way under *Settings → Repositories & mirrors*.
 - **Visibility** is detected; for **public** mirrors agents are warned that everything they commit becomes public.
 
 Moving an issue out of *In progress*/*Review* on the board cancels the agent working on it.

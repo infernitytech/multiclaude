@@ -226,7 +226,20 @@ function newProjectModal() {
   name.oninput = () => { if (!slugTouched) slug.value = name.value.toLowerCase().trim().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, ""); };
   slug.oninput = () => slugTouched = true;
   const desc = h("textarea", { placeholder: "What is this project about? Agents read this." });
-  const imp = h("input", { placeholder: "optional: https://github.com/you/repo.git" });
+  const imp = h("input", { placeholder: "optional: owner/name on GitHub, or https://…/repo.git" });
+  const tok = h("input", { type: "password", autocomplete: "off", placeholder: "default: the server-wide GitHub token" });
+  const mirror = h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: true }), "Keep it in sync both ways: work done here is pushed back, commits made there (e.g. merged pull requests) are pulled in");
+  const importOpts = h("div", { style: { display: "none" } },
+    h("label", { class: "field" }, h("span", null, "Access token (needed for private repositories and for pushing back)"), tok),
+    h("div", { class: "hint", style: { margin: "-6px 0 10px" } }, "Leave empty to use the server-wide GitHub token (Users & account). Fine-grained token: Contents read & write on the repository."),
+    h("div", { class: "field" }, mirror),
+    h("div", { class: "hint", style: { margin: "4px 0 12px" } }, "The default branch is taken from the imported repository. More repositories (e.g. a private one) can be added after creating the project, under Settings → Repositories & mirrors."));
+  imp.addEventListener("input", () => {
+    importOpts.style.display = imp.value.trim() ? "" : "none";
+    const m = imp.value.trim().match(/([\w.-]+?)(?:\.git)?\/?$/);
+    if (m && !name.dataset.touched) { name.value = m[1]; name.dispatchEvent(new Event("input")); }
+  });
+  name.addEventListener("keydown", () => { name.dataset.touched = "1"; });
   const review = h("select", null,
     h("option", { value: "agent" }, "Agent review (reviewer machines review, then auto-merge)"),
     h("option", { value: "human" }, "Human review (you approve & merge)"),
@@ -237,6 +250,7 @@ function newProjectModal() {
     h("label", { class: "field" }, h("span", null, "Repository slug (clone URL)"), slug),
     h("label", { class: "field" }, h("span", null, "Description"), desc),
     h("label", { class: "field" }, h("span", null, "Import existing git repository"), imp),
+    importOpts,
     h("label", { class: "field" }, h("span", null, "Review mode"), review),
     h("div", { class: "field" }, h("span", { class: "hint" }, "Machines working on this project"),
       S.overview.nodes.length ? nodes : h("div", { class: "hint" }, "No machines registered yet — install a runner from the Machines page."))),
@@ -244,7 +258,9 @@ function newProjectModal() {
       h("button", { class: "btn primary", onclick: async e => {
         e.target.disabled = true;
         try {
-          const p = await api("POST", "/api/projects", { name: name.value, slug: slug.value, description: desc.value, import_url: imp.value, review_mode: review.value, nodes: nodes.values() });
+          const p = await api("POST", "/api/projects", { name: name.value, slug: slug.value, description: desc.value, import_url: imp.value, import_token: tok.value, review_mode: review.value, nodes: nodes.values() });
+          if (imp.value.trim() && mirror.querySelector("input").checked)
+            await api("POST", `/api/projects/${p.slug}/repos/${p.slug}/mirrors`, { url: imp.value.trim(), token: tok.value, mode: "sync" }).catch(e => toast("Mirror not added: " + e.message, true));
           close(); await loadOverview(); go(`/p/${p.slug}`);
         } finally { e.target.disabled = false; }
       } }, "Create project")]);
@@ -1140,7 +1156,7 @@ function repoCard(p, r, reload) {
   const clone = `${location.origin}${r.clone_path}`;
   const mUrl = h("input", { placeholder: "owner/name (GitHub) or https://….git" });
   const mTok = h("input", { type: "password", placeholder: "token (default: server-wide GitHub token)", autocomplete: "off" });
-  const mMode = h("select", { style: { width: "auto" } }, h("option", { value: "default" }, "default branch + tags"), h("option", { value: "all" }, "all branches & tags (forced)"));
+  const mMode = h("select", { style: { width: "auto" } }, h("option", { value: "sync" }, "two-way sync (default branch + tags)"), h("option", { value: "default" }, "push only (default branch + tags)"), h("option", { value: "all" }, "push all branches & tags (forced)"));
   const mCreate = h("select", { style: { width: "auto" } }, h("option", { value: "" }, "repo exists"), h("option", { value: "private" }, "create private"), h("option", { value: "public" }, "create public"));
   return h("div", { class: "card pad", style: { marginBottom: "12px" } },
     h("div", { class: "row" }, h("b", null, "📦 " + r.name), r.primary ? h("span", { class: "chip" }, "primary") : null,
@@ -1156,7 +1172,7 @@ function repoCard(p, r, reload) {
       h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
         h("a", { href: m.url.replace(/\.git$/, ""), target: "_blank", rel: "noopener", style: { fontWeight: "600" } }, m.url.replace(/^https:\/\//, "").replace(/\.git$/, "")),
         m.visibility === "public" ? h("span", { class: "chip warn" }, "public") : m.visibility === "private" ? h("span", { class: "chip" }, "private") : null,
-        h("span", { class: "hint" }, m.mode === "all" ? "all branches & tags" : "default branch + tags"),
+        h("span", { class: "hint", title: { sync: "Commits made on the mirror (e.g. merged pull requests) are pulled in; ours are pushed", default: "Only pushes; fails if the mirror has commits we don't", all: "Overwrites every branch and tag on the mirror" }[m.mode] }, { sync: "⇅ two-way sync", default: "→ push only", all: "→ push all (forced)" }[m.mode] || m.mode),
         mirrorState(m), h("span", { class: "spacer" }),
         h("button", { class: "btn small ghost", onclick: async () => { toast("Syncing…"); await api("POST", `${base}/mirrors/${m.id}/sync`); reload(); } }, "Sync now"),
         h("button", { class: "btn small ghost", onclick: async () => { await api("PATCH", `${base}/mirrors/${m.id}`, { enabled: !m.enabled }); reload(); } }, m.enabled ? "Pause" : "Resume"),
@@ -1174,15 +1190,18 @@ function repoCard(p, r, reload) {
 function addRepoCard(p, reload) {
   const name = h("input", { placeholder: "name, e.g. backend" });
   const desc = h("input", { placeholder: "what it contains (agents see this)" });
-  const branch = h("input", { placeholder: "main", style: { width: "110px" } });
+  const branch = h("input", { placeholder: "default branch", title: "Leave empty: main, or the imported repository's own default branch", style: { width: "140px" } });
   const imp = h("input", { placeholder: "import from URL (optional)" });
   const tok = h("input", { type: "password", placeholder: "token for a private import (optional)", autocomplete: "off" });
+  const syncBack = h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: true }), "Add the imported repository as a two-way synced mirror");
   return h("details", { class: "card pad" }, h("summary", { style: { cursor: "pointer", fontWeight: "600" } }, "+ Add repository"),
     h("div", { style: { display: "grid", gap: "8px", marginTop: "10px" } },
-      h("div", { class: "row", style: { gap: "6px" } }, name, branch), desc, h("div", { class: "row", style: { gap: "6px" } }, imp, tok),
+      h("div", { class: "row", style: { gap: "6px" } }, name, branch), desc, h("div", { class: "row", style: { gap: "6px" } }, imp, tok), syncBack,
       h("div", { class: "hint" }, "Agents get every repository of the project checked out side by side and work on branch issue-N in the ones they change; approved issues are merged in all repositories at once."),
       h("div", { class: "row", style: { justifyContent: "flex-end" } }, h("button", { class: "btn primary", onclick: async () => {
-        await api("POST", `/api/projects/${p.slug}/repos`, { name: name.value, description: desc.value, default_branch: branch.value || "main", import_url: imp.value, import_token: tok.value });
+        const r = await api("POST", `/api/projects/${p.slug}/repos`, { name: name.value, description: desc.value, default_branch: branch.value.trim(), import_url: imp.value, import_token: tok.value });
+        if (imp.value.trim() && syncBack.querySelector("input").checked)
+          await api("POST", `/api/projects/${p.slug}/repos/${r.name}/mirrors`, { url: imp.value.trim(), token: tok.value, mode: "sync" }).catch(e => toast("Mirror not added: " + e.message, true));
         toast("Repository created"); reload();
       } }, "Create repository"))));
 }

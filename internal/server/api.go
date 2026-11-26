@@ -128,7 +128,7 @@ func (s *Server) apiCreateProject(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "invalid slug (use a-z, 0-9, . _ -)")
 		return
 	}
-	if in.DefaultBranch == "" {
+	if in.DefaultBranch == "" && strings.TrimSpace(in.ImportURL) == "" {
 		in.DefaultBranch = "main"
 	}
 	if in.ReviewMode != "human" && in.ReviewMode != "none" {
@@ -138,10 +138,11 @@ func (s *Server) apiCreateProject(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "a project with this slug already exists")
 		return
 	}
-	if err := s.createRepoAuth(in.Slug, in.Name, in.Description, in.DefaultBranch, strings.TrimSpace(in.ImportURL), firstNonEmpty(in.ImportToken, s.setting("github_token"))); err != nil {
+	if err := s.createRepoAuth(in.Slug, in.Name, in.Description, in.DefaultBranch, strings.TrimSpace(in.ImportURL), s.tokenFor(normalizeImport(in.ImportURL), in.ImportToken)); err != nil {
 		httpErr(w, 500, err.Error())
 		return
 	}
+	in.DefaultBranch = s.headBranch(in.Slug, in.DefaultBranch)
 	res, err := s.db.Exec(`INSERT INTO projects(slug,name,description,default_branch,review_mode,instructions,created_at) VALUES(?,?,?,?,?,?,?)`,
 		in.Slug, in.Name, in.Description, in.DefaultBranch, in.ReviewMode, in.Instructions, now())
 	if err != nil {

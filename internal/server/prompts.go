@@ -108,8 +108,11 @@ func repoContext(repos []*Repo) string {
 				continue
 			}
 			what := "its default branch " + r.DefaultBranch + " and tags"
-			if m.Mode == "all" {
+			switch m.Mode {
+			case "all":
 				what = "all branches and tags"
+			case "sync":
+				what = "its default branch " + r.DefaultBranch + " is synced both ways (commits made there, e.g. merged pull requests, are pulled into " + r.DefaultBranch + " here automatically) and tags"
 			}
 			vis := ""
 			switch m.Visibility {
