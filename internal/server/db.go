@@ -146,6 +146,7 @@ func openDB(path string) (*sql.DB, error) {
 		`ALTER TABLE runs ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE issues ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE issues ADD COLUMN stopped INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return nil, fmt.Errorf("migration %q: %w", m, err)

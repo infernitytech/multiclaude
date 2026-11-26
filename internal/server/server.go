@@ -244,6 +244,8 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/projects/{slug}/repo/blob", s.apiBlob)
 	m.HandleFunc("GET /api/projects/{slug}/repo/log", s.apiLog)
 	m.HandleFunc("GET /api/projects/{slug}/repo/commit", s.apiCommit)
+	m.HandleFunc("POST /api/projects/{slug}/stop", s.apiStopProject)
+	m.HandleFunc("POST /api/projects/{slug}/resume", s.apiResumeProject)
 	m.HandleFunc("GET /api/projects/{slug}/artifacts", s.apiArtifacts)
 	m.HandleFunc("PUT /api/projects/{slug}/artifacts/{name...}", s.apiPutArtifact)
 	m.HandleFunc("GET /api/projects/{slug}/artifacts/{name...}", s.apiGetArtifact)

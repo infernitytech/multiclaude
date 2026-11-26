@@ -427,12 +427,46 @@ func (s *Server) claimWork(n *Node, slots int) []proto.Command {
 		return x.issue.Number < y.issue.Number
 	})
 
+	// Fair share between projects: each free slot goes to the project with the
+	// fewest sessions on this machine right now (reviews still first), so a
+	// machine serving several projects doesn't drain one queue before the next.
+	load := map[int64]int{}
+	if rows, err := s.db.Query(`SELECT project_id, COUNT(*) FROM runs WHERE node_id=? AND status='running' AND kind<>'chat' GROUP BY project_id`, n.ID); err == nil {
+		for rows.Next() {
+			var pid int64
+			var k int
+			if rows.Scan(&pid, &k) == nil {
+				load[pid] = k
+			}
+		}
+		rows.Close()
+	}
+	pick := func() candidate {
+		best := 0
+		for k := 1; k < len(cands); k++ {
+			x, b := cands[k], cands[best]
+			if x.review != b.review {
+				if x.review {
+					best = k
+				}
+				continue
+			}
+			if load[x.project.ID] < load[b.project.ID] {
+				best = k
+			}
+		}
+		c := cands[best]
+		cands = append(cands[:best], cands[best+1:]...)
+		return c
+	}
+
 	var cmds []proto.Command
 	leased := s.gpuLeases(n.ID)
-	for _, c := range cands {
+	for len(cands) > 0 {
 		if len(cmds) >= slots {
 			break
 		}
+		c := pick()
 		need, _ := parseGPUNeed(c.issue.Requires)
 		gpus, ok := allocGPUs(n, need, leased)
 		if !ok {
@@ -460,6 +494,7 @@ func (s *Server) claimWork(n *Node, slots int) []proto.Command {
 			leased[g] = runID
 		}
 		cmds = append(cmds, proto.Command{Type: "assign", Assignment: a})
+		load[c.project.ID]++
 		verb := "started working on"
 		if c.review {
 			verb = "started reviewing"

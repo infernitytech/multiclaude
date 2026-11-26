@@ -225,6 +225,82 @@ func (s *Server) apiUpdateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, p)
 }
 
+// apiStopProject stops all work on a project for now: dispatch is paused, every
+// running session is stopped (uncommitted work is saved on its branch), and
+// To do / In progress issues move to the backlog. Resume moves exactly those
+// back to To do.
+func (s *Server) apiStopProject(w http.ResponseWriter, r *http.Request) {
+	p := s.projectFromReq(w, r)
+	if p == nil {
+		return
+	}
+	who := "human"
+	if u := userFrom(r); u != nil {
+		who = u.Username
+	}
+	s.db.Exec(`UPDATE projects SET dispatch=0 WHERE id=?`, p.ID)
+	// running sessions (issue work, reviews, chats)
+	var runs []*Run
+	if rows, err := s.db.Query(runSelect+`WHERE r.project_id=? AND r.status='running'`, p.ID); err == nil {
+		for rows.Next() {
+			if x, err := scanRun(rows); err == nil {
+				runs = append(runs, x)
+			}
+		}
+		rows.Close()
+	}
+	var issues []*Issue
+	if rows, err := s.db.Query(`SELECT `+issueCols+` FROM issues WHERE project_id=? AND (status IN ('todo','in_progress') OR run_id<>'')`, p.ID); err == nil {
+		for rows.Next() {
+			if i, err := scanIssue(rows); err == nil {
+				issues = append(issues, i)
+			}
+		}
+		rows.Close()
+	}
+	moved := 0
+	for _, i := range issues {
+		if i.Status == "todo" || i.Status == "in_progress" {
+			s.db.Exec(`UPDATE issues SET status='backlog', run_id='', stopped=1, updated_at=? WHERE id=?`, now(), i.ID)
+			s.addComment(i.ID, who, fmt.Sprintf("⏸ Work on the project was stopped — moved %s → backlog. Resuming the project moves it back to To do.", i.Status))
+			moved++
+		} else { // a review in progress: stop the reviewer, the issue stays in Review
+			s.db.Exec(`UPDATE issues SET run_id='', updated_at=? WHERE id=?`, now(), i.ID)
+		}
+	}
+	for _, run := range runs {
+		if n, err := s.node(run.NodeID); err == nil && n.Online {
+			s.enqueue(run.NodeID, proto.Command{Type: "cancel", RunID: run.ID})
+		} else {
+			s.finishRun(run.ID, proto.RunFinish{Status: "cancelled", Error: "project stopped"})
+		}
+	}
+	s.postMessage(p.ID, "multiclaude", "", fmt.Sprintf("⏸ %s stopped all work on the project: %d session(s) stopped, %d issue(s) moved to the backlog.", who, len(runs), moved))
+	s.emit(event{Type: "projects"})
+	s.issueChanged(p.ID)
+	writeJSON(w, map[string]int{"stopped_runs": len(runs), "moved": moved})
+}
+
+func (s *Server) apiResumeProject(w http.ResponseWriter, r *http.Request) {
+	p := s.projectFromReq(w, r)
+	if p == nil {
+		return
+	}
+	who := "human"
+	if u := userFrom(r); u != nil {
+		who = u.Username
+	}
+	s.db.Exec(`UPDATE projects SET dispatch=1 WHERE id=?`, p.ID)
+	res, _ := s.db.Exec(`UPDATE issues SET status='todo', stopped=0, updated_at=? WHERE project_id=? AND stopped=1 AND status='backlog'`, now(), p.ID)
+	s.db.Exec(`UPDATE issues SET stopped=0 WHERE project_id=?`, p.ID)
+	k, _ := res.RowsAffected()
+	s.postMessage(p.ID, "multiclaude", "", fmt.Sprintf("▶ %s resumed the project: %d issue(s) back in To do.", who, k))
+	s.emit(event{Type: "projects"})
+	s.issueChanged(p.ID)
+	s.workAvailable()
+	writeJSON(w, map[string]int64{"moved": k})
+}
+
 func (s *Server) apiDeleteProject(w http.ResponseWriter, r *http.Request) {
 	p := s.projectFromReq(w, r)
 	if p == nil {

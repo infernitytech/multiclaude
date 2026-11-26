@@ -603,7 +603,23 @@ function boardView(info) {
     boardEl.querySelectorAll(".col-body").forEach((b, k) => b.scrollTop = scrolls[k] || 0);
     noMachines.innerHTML = "";
     if (!info.nodes.length) add(noMachines, [h("span", { class: "chip warn" }, "No machines assigned — "), " ", link(`/p/${slug}/settings`, "assign machines")]);
-    else if (!info.project.dispatch) add(noMachines, [h("span", { class: "chip warn" }, "Dispatch paused")]);
+    if (info.project.dispatch) add(noMachines, [h("button", { class: "btn small", title: "Stop every running agent and move To do / In progress to the backlog", onclick: stopWork }, "⏸ Stop all work")]);
+    else add(noMachines, [h("span", { class: "chip warn" }, "⏸ Paused"), " ", h("button", { class: "btn small primary", title: "Move the stopped issues back to To do and dispatch again", onclick: resumeWork }, "▶ Resume")]);
+  }
+  function stopWork() {
+    const running = data.agents.length;
+    modal(`Stop all work on ${info.project.name}?`, h("div", null,
+      h("p", null, `${running ? `${running} running agent session${running > 1 ? "s" : ""} will be stopped — uncommitted work is saved on each issue's branch as a WIP commit. ` : ""}Every issue in To do and In progress moves to the backlog, and nothing new is dispatched.`),
+      h("p", { class: "hint" }, "Issues in Review stay there (a running agent review is stopped). Resume moves exactly the stopped issues back to To do; the next sessions continue from their branches.")),
+      close => [h("button", { class: "btn", onclick: close }, "Cancel"),
+        h("button", { class: "btn danger solid", onclick: async () => {
+          const r = await api("POST", `/api/projects/${slug}/stop`); close();
+          info.project.dispatch = false; toast(`Stopped ${r.stopped_runs} session(s), ${r.moved} issue(s) to the backlog`); loadOverview(); load();
+        } }, "Stop all work")]);
+  }
+  async function resumeWork() {
+    const r = await api("POST", `/api/projects/${slug}/resume`);
+    info.project.dispatch = true; toast(`Resumed — ${r.moved} issue(s) back in To do`); loadOverview(); load();
   }
   async function load() {
     data = await api("GET", `/api/projects/${slug}/board?per=${PER}&done=20${filter ? "&q=" + encodeURIComponent(filter) : ""}`);
