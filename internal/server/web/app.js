@@ -457,14 +457,6 @@ setInterval(() => document.querySelectorAll("[data-actmeta]").forEach(el => {
   const r = el._run; if (r) el.textContent = actMeta(r, ACT[r.id] || r.activity);
 }), 5000);
 
-// Which assigned machines could ever take an issue with these requirements?
-function canRun(info, requires) {
-  if (!requires || !requires.length) return true;
-  const assigned = new Set(info.nodes);
-  return S.overview.nodes.some(n => assigned.has(n.id) && (n.roles || []).includes("worker") &&
-    requires.every(r => [...(n.caps || []), ...(n.extra_caps || [])].some(c => c.toLowerCase() === r.toLowerCase()) &&
-      !(n.disabled_caps || []).some(c => c.toLowerCase() === r.toLowerCase())));
-}
 
 function boardView(info) {
   const slug = info.project.slug;
@@ -487,7 +479,7 @@ function boardView(info) {
   let dragId = null;
   function card(i) {
     const agent = i.run_id && data.agents.find(r => r.id === i.run_id);
-    const stuck = i.status !== "done" && !canRun(info, i.requires);
+    const stuck = i.no_machine;
     return h("div", {
       class: `issue-card p${i.priority}` + (agent ? " live" : ""), draggable: "true", "data-id": i.id,
       ondragstart: e => { dragId = i.id; e.dataTransfer.effectAllowed = "move"; e.target.classList.add("dragging"); },
@@ -668,7 +660,7 @@ function listView(info, params, archive) {
         h("td", null, h("span", { class: "prio p" + i.priority }, PRIOS[i.priority])),
         h("td", null, h("span", { class: "row wrap", style: { gap: "4px" } }, i.labels.map(l => h("span", { class: "chip" }, l)),
           i.requires.map(x => h("span", { class: "chip req" }, "⚙ " + x)),
-          i.status !== "done" && !canRun(info, i.requires) ? h("span", { class: "chip bad" }, "⚠ no machine") : null)),
+          i.no_machine ? h("span", { class: "chip bad" }, "⚠ no machine") : null)),
         h("td", { class: "hint" }, i.assignee || "—"),
         h("td", { class: "hint", style: { whiteSpace: "nowrap" } }, ago(i.updated_at))))));
     pager.innerHTML = "";
@@ -1318,10 +1310,12 @@ function machinesView() {
         h("div", { class: "k" }, "Claude"), h("div", null, n.claude_version || "?", " ", h("span", { class: "chip " + (authOk ? "ok" : "bad") }, n.claude_auth || "auth unknown")),
         h("div", { class: "k" }, "Account"), h("div", null, n.claude_account || h("span", { class: "hint" }, n.online ? "unknown (update the runner)" : "unknown")),
         h("div", { class: "k" }, "Load"), loadBlock(n),
-        h("div", { class: "k" }, "CPU"), h("div", null, `${hw.cpu_model || "?"} · ${hw.cpu_cores} cores`),
+        h("div", { class: "k" }, "CPU"), h("div", null, `${hw.cpu_model || "?"} · ${hw.cpu_cores} cores`, (hw.cpu_features || []).length ? h("span", { class: "hint" }, " · " + hw.cpu_features.join(", ")) : null),
         h("div", { class: "k" }, "Memory"), h("div", null, `${hw.memory_gb} GB · ${hw.disk_free_gb} GB disk free`),
         h("div", { class: "k" }, (hw.gpus || []).length > 1 ? `GPUs (${hw.gpus.length})` : "GPU"), h("div", null, (hw.gpus || []).length ? gpuList(n, hw.gpus, save) : h("span", { class: "hint" }, "none")),
-        h("div", { class: "k" }, "System"), h("div", null, `${hw.os}/${hw.arch} · runner ${n.runner_version}`)),
+        h("div", { class: "k" }, "System"), h("div", null, `${hw.os}/${hw.arch} · runner ${n.runner_version}`,
+          [hw.cuda_version && ` · CUDA ≤ ${hw.cuda_version}`, hw.cuda_toolkit && ` · nvcc ${hw.cuda_toolkit}`, hw.rocm_version && ` · ROCm ${hw.rocm_version}`,
+           (hw.gpus || [])[0]?.driver && ` · driver ${hw.gpus[0].driver}`].filter(Boolean).join(""))),
       h("div", { class: "row wrap", style: { gap: "4px", marginBottom: "4px" } },
         [...n.caps, ...n.extra_caps].map(c => {
           const off = (n.disabled_caps || []).some(d => d.toLowerCase() === c.toLowerCase());
@@ -1513,6 +1507,9 @@ function gpuList(n, gpus, save) {
     const tag = `gpu#${i}`, off = (n.disabled_caps || []).some(d => d.toLowerCase() === tag), r = holder[i];
     return h("div", { class: "row", style: { gap: "6px", fontSize: "13px" } },
       h("span", { class: "mono hint" }, `#${i}`), h("span", null, g.name + (g.memory_mb ? ` · ${Math.round(g.memory_mb / 1024)} GB` : "")),
+      g.arch && g.vendor !== "apple" ? h("span", { class: "chip req", title: "Architecture — usable in requires, e.g. " + g.arch.split(" ")[0].toLowerCase() }, g.arch) : null,
+      g.compute_cap ? h("span", { class: "chip", title: g.vendor === "nvidia" ? `Compute capability ${g.compute_cap} (requires sm_${g.compute_cap.replace(".", "")} or sm>=…)` : g.vendor === "amd" ? "AMD target" : "Metal" },
+        g.vendor === "nvidia" ? `sm_${g.compute_cap.replace(".", "")}` : g.compute_cap) : null,
       r ? h("span", { class: "chip warn", title: `run ${r.id}` }, r.issue_number ? `busy: ${r.project_slug} #${r.issue_number}` : `busy: ${r.kind}`) : off ? null : h("span", { class: "chip ok" }, "free"),
       gpus.length > 1 ? h("span", { class: "chip click cap " + (off ? "off" : ""), title: off ? "Reserved: no agent gets this GPU. Click to release it." : "Click to reserve this GPU (agents won't get it; running ones continue)",
         onclick: () => save({ disabled_caps: off ? n.disabled_caps.filter(d => d.toLowerCase() !== tag) : [...(n.disabled_caps || []), tag] }) }, off ? "⊘ reserved" : "reserve") : null);

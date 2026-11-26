@@ -282,6 +282,7 @@ func (s *Server) apiIssues(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 500, err.Error())
 			return
 		}
+		s.markNoMachine(p.ID, items)
 		writeJSON(w, map[string]any{"items": items, "total": total})
 		return
 	}

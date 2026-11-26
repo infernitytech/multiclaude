@@ -154,6 +154,7 @@ func (s *Server) apiBoard(w http.ResponseWriter, r *http.Request) {
 		for _, i := range c.Items {
 			i.OpenQuestions = open[i.ID]
 		}
+		s.markNoMachine(p.ID, c.Items)
 	}
 	writeJSON(w, map[string]any{"columns": cols, "agents": s.withActivity(s.projectAgents(p.ID))})
 }

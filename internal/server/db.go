@@ -214,15 +214,17 @@ type Issue struct {
 	Assignee  string   `json:"assignee"`
 	RunID     string   `json:"run_id"`
 	// OpenQuestions counts unanswered ask_human questions (filled for board/detail views).
-	OpenQuestions int       `json:"open_questions,omitempty"`
-	Attempts      int       `json:"attempts"`
-	Branch        string    `json:"branch"`
-	CreatedBy     string    `json:"created_by"`
-	CreatedAt     int64     `json:"created_at"`
-	UpdatedAt     int64     `json:"updated_at"`
-	Sort          float64   `json:"sort"`
-	Comments      []Comment `json:"comments"`
-	Runs          []Run     `json:"runs"`
+	OpenQuestions int `json:"open_questions,omitempty"`
+	// NoMachine: no worker assigned to the project can ever satisfy "requires" (board/list views).
+	NoMachine bool      `json:"no_machine,omitempty"`
+	Attempts  int       `json:"attempts"`
+	Branch    string    `json:"branch"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt int64     `json:"created_at"`
+	UpdatedAt int64     `json:"updated_at"`
+	Sort      float64   `json:"sort"`
+	Comments  []Comment `json:"comments"`
+	Runs      []Run     `json:"runs"`
 }
 
 const issueCols = `id,project_id,number,title,body,status,priority,labels,requires,depends_on,assignee,run_id,attempts,branch,created_by,created_at,updated_at,sort`

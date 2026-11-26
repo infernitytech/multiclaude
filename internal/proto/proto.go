@@ -15,6 +15,12 @@ type GPU struct {
 	Index    int    `json:"index"`
 	HasIndex bool   `json:"has_index,omitempty"`
 	UUID     string `json:"uuid,omitempty"`
+	// Arch is the architecture family (e.g. "Blackwell", "Ada Lovelace", "CDNA3", "Apple M4 Max").
+	Arch string `json:"arch,omitempty"`
+	// ComputeCap: NVIDIA compute capability ("12.0" = sm_120), AMD gfx target ("gfx942"), Apple Metal family.
+	ComputeCap string `json:"compute_cap,omitempty"`
+	Driver     string `json:"driver,omitempty"`
+	Cores      int    `json:"cores,omitempty"` // Apple GPU cores
 }
 
 type Hardware struct {
@@ -27,6 +33,11 @@ type Hardware struct {
 	DiskFreeGB float64  `json:"disk_free_gb"`
 	GPUs       []GPU    `json:"gpus"`
 	Tools      []string `json:"tools"`
+	// CPUFeatures lists notable instruction-set extensions (avx2, avx512, amx, sve, …).
+	CPUFeatures []string `json:"cpu_features,omitempty"`
+	CUDAVersion string   `json:"cuda_version,omitempty"` // highest CUDA version the driver supports
+	CUDAToolkit string   `json:"cuda_toolkit,omitempty"` // nvcc release, if installed
+	ROCmVersion string   `json:"rocm_version,omitempty"`
 }
 
 // Load is a machine's current utilisation, reported every few seconds.
@@ -200,7 +211,7 @@ var Tools = []Tool{
 		})},
 	{"get_issue", "Get one issue with its full description, comments and history.",
 		obj(map[string]any{"number": num}, "number")},
-	{"create_issue", "Create a new issue on the shared board so that some agent (or a human) picks it up. Use for follow-up work you discover, or to split large work into parallel pieces. 'requires' lists capabilities a machine must have — all of them (e.g. gpu, cuda, docker; GPU jobs can also ask for gpus:N = N GPUs on one machine and vram:N = at least N GB per GPU, and get them exclusively); only use capabilities listed under \"Hardware routing\" in your instructions, otherwise no machine can take the issue. 'depends_on' lists issue numbers that must be done first.",
+	{"create_issue", "Create a new issue on the shared board so that some agent (or a human) picks it up. Use for follow-up work you discover, or to split large work into parallel pieces. 'requires' lists capabilities a machine must have — all of them (e.g. gpu, cuda, docker; GPU jobs can also ask for gpus:N = N GPUs on one machine, vram:N = at least N GB per GPU, a GPU architecture like blackwell/hopper/ada, sm_90 (exact) or sm>=80 (minimum compute capability), and get the GPUs exclusively); only use capabilities listed under \"Hardware routing\" in your instructions, otherwise no machine can take the issue. 'depends_on' lists issue numbers that must be done first.",
 		obj(map[string]any{
 			"title":      str,
 			"body":       desc(str, "Markdown description with enough context for another agent to work on it independently"),

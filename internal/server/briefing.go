@@ -46,6 +46,29 @@ func (s *Server) schedulabilityNote(p *Project, i *Issue) string {
 	return fmt.Sprintf(" ⚠ WARNING: no worker machine assigned to this project has all of [%s], so nobody will ever pick this issue up. Fix 'requires' (see the hardware routing list in your instructions) unless a human is going to add such a machine.", strings.Join(i.Requires, ", "))
 }
 
+// markNoMachine flags open issues whose "requires" no assigned worker can
+// satisfy (with the real GPU rules: gpus:N, vram:N, architecture, …).
+func (s *Server) markNoMachine(pid int64, issues []*Issue) {
+	var workers []*Node
+	for _, n := range s.projectMachines(pid) {
+		if n.HasRole("worker") {
+			workers = append(workers, n)
+		}
+	}
+	for _, i := range issues {
+		if len(i.Requires) == 0 || i.Status == "done" {
+			continue
+		}
+		i.NoMachine = true
+		for _, n := range workers {
+			if canEverRun(n, i.Requires) {
+				i.NoMachine = false
+				break
+			}
+		}
+	}
+}
+
 // hardwareRouting tells agents which capabilities exist and how to route work.
 func (s *Server) hardwareRouting(p *Project) string {
 	machines := s.projectMachines(p.ID)
@@ -98,7 +121,7 @@ func (s *Server) hardwareRouting(p *Project) string {
 		b.WriteString("- All machines have the same capabilities, so \"requires\" is rarely needed.\n")
 	}
 	b.WriteString(`- Rules: an issue is only given to a machine that has ALL capabilities in its "requires". Leave "requires" empty when any machine can do the work — that keeps it parallel. Set it only for real needs: gpu/cuda/nvidia/rocm/mps for GPU work (training, CUDA kernels, GPU benchmarks), macos for Xcode/iOS/macOS builds, bigmem for very memory-hungry jobs, a tool name (docker, blender, unity, godot, ffmpeg, nvcc, …) when that tool must be installed. Use only capability names from the list above; anything else makes the issue unclaimable (create_issue/update_issue warn you).
-- GPUs are handed out exclusively per session: "gpu" (or cuda/rocm/…) = one GPU, "gpus:N" = N GPUs on the same machine (multi-GPU training, DDP, big models split across GPUs), "vram:N" = every assigned GPU has at least N GB. Several GPU issues run in parallel on a multi-GPU machine, one per free GPU — so prefer several 1-GPU issues (e.g. a hyper-parameter sweep) over one big job when the work allows it, and ask for gpus:N only when one job really needs several GPUs at once.
+- GPUs are handed out exclusively per session: "gpu" (or cuda/rocm/…) = one GPU, "gpus:N" = N GPUs on the same machine (multi-GPU training, DDP, big models split across GPUs), "vram:N" = every assigned GPU has at least N GB. Several GPU issues run in parallel on a multi-GPU machine, one per free GPU — so prefer several 1-GPU issues (e.g. a hyper-parameter sweep) over one big job when the work allows it, and ask for gpus:N only when one job really needs several GPUs at once. GPU generation: an architecture tag (e.g. "blackwell", "hopper", "ada", "ampere", "cdna3") or "sm_90" (exact compute capability) / "sm>=80" (at least, e.g. bf16 or FlashAttention needs) / "gfx942" (AMD target) restricts the issue to matching GPUs — use it when code is built for a specific architecture (CUDA arch flags, FP8/FP4 kernels, TensorRT engines), not by default.
 - Split mixed work: CPU-only preparation (code, data pipeline, tests) as one issue, the hardware-specific run as another with "requires" and "depends_on". Keep hardware-bound issues small, since few machines can take them; machines with special capabilities prefer such issues.
 - If you need hardware this machine doesn't have, don't fake it: create an issue with the right "requires" (or call block_issue if your own assignment can't be done here).
 `)

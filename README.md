@@ -125,15 +125,19 @@ Auto-detected capabilities include:
 
 ### Machines with several GPUs
 
-Every GPU is detected individually (model, memory, device number). GPUs are handed out **exclusively per session**, so several GPU agents can run on one machine without fighting over a card:
+Every GPU is detected individually: model, memory, device number, architecture (Blackwell, Hopper, Ada Lovelace, CDNA3, …), compute capability (`sm_120`) or AMD target (`gfx942`), and driver. The runner also reports the CUDA version the driver supports, the CUDA toolkit (`nvcc`), the ROCm version and CPU instruction sets (AVX-512, AMX, SVE, …). Agents see all of this for their own machine and for every other machine. GPUs are handed out **exclusively per session**, so several GPU agents can run on one machine without fighting over a card:
 
 | `requires` | Gets |
 |---|---|
 | `gpu` (or `cuda`, `nvidia`, `rocm`, `mps`) | 1 GPU |
 | `gpus:N` | N GPUs on the same machine (DDP, model parallelism) |
 | `vram:N` | only GPUs with at least N GB memory |
+| `blackwell`, `hopper`, `ada`, `ampere`, `cdna3`, … | only GPUs of that architecture |
+| `sm_90` / `sm>=80` | exact / minimum NVIDIA compute capability |
+| `gfx942` | that AMD target |
 
 - The session sees only its GPUs (`CUDA_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES`), and its prompt says which GPUs it has, how many the machine has, and how to use them (e.g. `torchrun --nproc_per_node=N`, Docker `--gpus "device=…"`).
+- Agents are told which architectures to compile for (`TORCH_CUDA_ARCH_LIST`, `CMAKE_CUDA_ARCHITECTURES`, `nvcc -gencode …`, `--offload-arch`).
 - The smallest suitable GPUs are used first, keeping big ones free for big jobs. An issue waits until enough GPUs are free.
 - Sessions that didn't ask for a GPU only see GPUs that were idle when they started, and are told those aren't reserved for them.
 - Agents know every machine's GPU count and are encouraged to split work into 1-GPU issues (e.g. sweeps) when possible.

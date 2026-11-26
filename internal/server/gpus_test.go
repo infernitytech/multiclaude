@@ -59,3 +59,38 @@ func TestAllocGPUs(t *testing.T) {
 		t.Error(s)
 	}
 }
+
+func TestGPUArchNeeds(t *testing.T) {
+	hw, _ := json.Marshal(proto.Hardware{GPUs: []proto.GPU{
+		{Vendor: "nvidia", Name: "RTX 4090", MemoryMB: 24564, Arch: "Ada Lovelace", ComputeCap: "8.9"},
+		{Vendor: "nvidia", Name: "H100", MemoryMB: 81559, Arch: "Hopper", ComputeCap: "9.0"},
+		{Vendor: "nvidia", Name: "RTX PRO 6000", MemoryMB: 97887, Arch: "Blackwell", ComputeCap: "12.0"},
+	}})
+	n := &Node{Hardware: hw, Caps: []string{"linux", "gpu", "cuda"}}
+	for _, c := range []struct {
+		req  []string
+		want []int
+	}{
+		{[]string{"hopper"}, []int{1}},
+		{[]string{"Blackwell"}, []int{2}},
+		{[]string{"sm_89"}, []int{0}},
+		{[]string{"sm>=90"}, []int{1}}, // smallest suitable first
+		{[]string{"sm_90+", "gpus:2"}, []int{1, 2}},
+		{[]string{"ada", "vram:48"}, nil}, // no 48 GB Ada GPU
+	} {
+		need, rest := parseGPUNeed(c.req)
+		if len(rest) != 0 {
+			t.Errorf("%v: rest %v", c.req, rest)
+		}
+		got, _ := allocGPUs(n, need, nil)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%v: got %v want %v", c.req, got, c.want)
+		}
+		if canEverRun(n, c.req) != (c.want != nil) {
+			t.Errorf("%v: canEverRun", c.req)
+		}
+	}
+	if s := strings.Join(gpuSummary(nodeGPUs(n)), ", "); !strings.Contains(s, "GPU H100 (80 GB, Hopper, sm_90)") {
+		t.Error(s)
+	}
+}

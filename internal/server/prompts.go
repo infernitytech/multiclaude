@@ -12,14 +12,34 @@ func hwSummary(n *Node) string {
 	var hw proto.Hardware
 	json.Unmarshal(n.Hardware, &hw)
 	parts := []string{fmt.Sprintf("%s/%s", hw.OS, hw.Arch)}
+	cpu := strings.TrimSpace(hw.CPUModel)
 	if hw.CPUCores > 0 {
-		parts = append(parts, fmt.Sprintf("%d cores", hw.CPUCores))
+		cpu = strings.TrimSpace(fmt.Sprintf("%s, %d cores", cpu, hw.CPUCores))
+	}
+	if len(hw.CPUFeatures) > 0 {
+		cpu += " (" + strings.Join(hw.CPUFeatures, ", ") + ")"
+	}
+	if cpu != "" {
+		parts = append(parts, "CPU "+cpu)
 	}
 	if hw.MemoryGB > 0 {
 		parts = append(parts, fmt.Sprintf("%.0f GB RAM", hw.MemoryGB))
 	}
 	parts = append(parts, gpuSummary(hw.GPUs)...)
-	return strings.Join(parts, ", ")
+	var sw []string
+	if hw.CUDAVersion != "" {
+		sw = append(sw, "driver supports CUDA ≤ "+hw.CUDAVersion)
+	}
+	if hw.CUDAToolkit != "" {
+		sw = append(sw, "CUDA toolkit (nvcc) "+hw.CUDAToolkit)
+	}
+	if hw.ROCmVersion != "" {
+		sw = append(sw, "ROCm "+hw.ROCmVersion)
+	}
+	if len(sw) > 0 {
+		parts = append(parts, strings.Join(sw, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (s *Server) systemPrompt(runID string, p *Project, n *Node) string {
