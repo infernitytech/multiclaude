@@ -68,6 +68,22 @@ const (
 	drainPause = 2 * time.Hour
 )
 
+// followsUpdates: this runner replaces itself with the server's version at all
+// (now, or once idle); false for dev builds, MC_NO_SELF_UPDATE and failures.
+func (r *Runner) followsUpdates() bool {
+	if proto.Version == "dev" || os.Getenv("MC_NO_SELF_UPDATE") != "" {
+		return false
+	}
+	for _, t := range r.updateTried {
+		if time.Since(t) < 15*time.Minute {
+			return false // the last attempt failed
+		}
+	}
+	return true
+}
+
+func ptr[T any](v T) *T { return &v }
+
 // canSelfUpdate: this runner will update itself to the server's version (so
 // the server should send it no new work until it has). False after a failed
 // attempt, so a runner that cannot update keeps working.

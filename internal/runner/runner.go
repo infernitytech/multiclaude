@@ -271,7 +271,7 @@ func (r *Runner) pollLoop(ctx context.Context) error {
 		r.mu.Unlock()
 		var resp proto.PollResponse
 		err := r.postCtx(ctx, "/api/runner/poll", proto.PollRequest{NodeID: r.nodeID, FreeSlots: r.cfg.Concurrency - len(active), ActiveRuns: active, Draining: r.pendingUpdate,
-			Version: proto.Version, AutoUpdate: r.canSelfUpdate()}, &resp)
+			Version: proto.Version, AutoUpdate: r.canSelfUpdate(), SelfUpdate: ptr(r.followsUpdates())}, &resp)
 		if err != nil {
 			var he *httpError
 			if errors.As(err, &he) && (he.code == 404 || he.code == 401) {

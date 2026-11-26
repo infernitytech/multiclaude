@@ -1397,6 +1397,29 @@ function addRepoCard(p, reload) {
 }
 
 // ---------- machines ----------
+// versionChip: does this machine's runner match the server, and if not, will it catch up by itself?
+function versionChip(n) {
+  const sv = S.overview.version || "", rv = n.runner_version || "";
+  if (!rv || !sv) return null;
+  if (sv === "dev" || rv === "dev")
+    return h("span", { class: "chip", title: `Development build (server ${sv}, runner ${rv}) — versions are not compared and runners don't update themselves` }, `runner ${rv}`);
+  if (rv === sv) return h("span", { class: "chip ok", title: `The runner runs the same version as the server (${sv})` }, `✓ ${rv}`);
+  let label = `runner ${rv} · server ${sv}`, title;
+  if (n.updating_to) {
+    label = `updating ${rv} → ${n.updating_to}`;
+    title = "The runner updates itself as soon as its running sessions are done. It takes no new work for up to 15 minutes while waiting, then works normally again and updates when it is next idle.";
+  } else if (!n.online) {
+    title = "Offline. The runner updates itself when it comes back (unless self-update is disabled there).";
+  } else if (n.self_update === true) {
+    title = "Outdated. The runner updates itself the next time it has no running sessions (it holds back new work for up to 15 minutes every 2 hours to get there).";
+  } else if (n.self_update === false) {
+    title = "Outdated, and this runner won't update itself: MC_NO_SELF_UPDATE is set, it is a dev build, or its last update attempt failed (see journalctl --user -u multiclaude-runner). It retries a failed update after 15 minutes; otherwise re-run the install command on that machine.";
+  } else {
+    title = "Outdated. This runner is too old to report whether it updates itself; re-run the install command on that machine if it stays like this.";
+  }
+  return h("span", { class: "chip " + (n.self_update === false ? "bad" : "warn"), title }, label);
+}
+
 function machinesView() {
   const content = h("div", { class: "content" });
   const el = h("div", { style: { display: "contents" } },
@@ -1449,7 +1472,7 @@ function machinesView() {
     return h("div", { class: "card pad machine" },
       h("div", { class: "hdr" }, h("span", { class: "dot " + (n.online ? (n.active.length ? "busy" : "on") : "") }), h("h3", null, n.name),
         h("span", { class: "hint" }, n.online ? (n.active.length ? `${n.active.length}/${n.max_conc} busy` : "idle") : `offline · seen ${ago(n.last_seen)}`),
-        n.updating_to && h("span", { class: "chip warn", title: "The runner updates itself as soon as its running sessions are done. It takes no new work for up to 15 minutes while waiting, then works normally again and updates when it is next idle." }, `updating to ${n.updating_to}`),
+        versionChip(n),
         h("span", { class: "spacer" }),
         n.paused && h("span", { class: "chip warn" }, "paused"),
         h("button", { class: "btn small", onclick: () => save({ paused: !n.paused }) }, n.paused ? "Resume" : "Pause")),

@@ -276,6 +276,7 @@ type Node struct {
 	Load          *proto.Load     `json:"load,omitempty"`        // live, in-memory
 	UpdatingTo    string          `json:"updating_to,omitempty"` // runner waits for its sessions to end, then updates
 	RunnerVersion string          `json:"runner_version"`
+	SelfUpdate    *bool           `json:"self_update,omitempty"` // live: the runner follows server updates by itself (nil = not reported yet)
 	Model         string          `json:"model"`
 	LastSeen      int64           `json:"last_seen"`
 	RegisteredAt  int64           `json:"registered_at"`

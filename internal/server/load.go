@@ -84,6 +84,28 @@ func setDraining(nodeID, version string) {
 	}
 }
 
+// selfUpdate: what each runner last said about following server updates.
+var selfUpdate = map[string]bool{} // node id → follows updates (guarded by loadMu)
+
+func setSelfUpdate(nodeID string, req proto.PollRequest) {
+	v := req.AutoUpdate // older runners: the best we know
+	if req.SelfUpdate != nil {
+		v = *req.SelfUpdate
+	}
+	loadMu.Lock()
+	selfUpdate[nodeID] = v
+	loadMu.Unlock()
+}
+
+func selfUpdateOf(nodeID string) *bool {
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	if v, ok := selfUpdate[nodeID]; ok {
+		return &v
+	}
+	return nil
+}
+
 func drainingTo(nodeID string) string {
 	loadMu.Lock()
 	defer loadMu.Unlock()

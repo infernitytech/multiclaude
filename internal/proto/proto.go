@@ -98,6 +98,10 @@ type PollRequest struct {
 	// that is about to update itself to the server's version.
 	Version    string `json:"version,omitempty"`
 	AutoUpdate bool   `json:"auto_update,omitempty"`
+	// SelfUpdate: the runner follows server updates by itself at all (unlike
+	// AutoUpdate, also true while it temporarily works on despite an update).
+	// Shown in the UI; nil from runners that predate it.
+	SelfUpdate *bool `json:"self_update,omitempty"`
 }
 
 // Command is something the server asks a runner to do.

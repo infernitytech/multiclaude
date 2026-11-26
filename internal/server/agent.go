@@ -342,6 +342,7 @@ func (s *Server) listNodes() ([]*Node, error) {
 		n.Projects = s.nodeProjects(n.ID)
 		n.Load = loadOf(n.ID)
 		n.UpdatingTo = drainingTo(n.ID)
+		n.SelfUpdate = selfUpdateOf(n.ID)
 		n.Active = []Run{}
 		rr, err := s.db.Query(runSelect+`WHERE r.node_id=? AND r.status='running' ORDER BY r.started_at`, n.ID)
 		if err == nil {

@@ -47,6 +47,7 @@ func (s *Server) node(id string) (*Node, error) {
 	n.Projects = s.nodeProjects(id)
 	n.Load = loadOf(id)
 	n.UpdatingTo = drainingTo(id)
+	n.SelfUpdate = selfUpdateOf(id)
 	return n, nil
 }
 
@@ -167,6 +168,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.NodeID = nodeFrom(r) // a machine can only poll for itself
+	setSelfUpdate(req.NodeID, req)
 	// A runner on another version that updates itself gets no new work: it
 	// finishes its sessions, then restarts as the server's version.
 	if req.Draining == "" && req.AutoUpdate && req.Version != "" && req.Version != proto.Version && proto.Version != "dev" {
