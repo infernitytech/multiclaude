@@ -27,13 +27,13 @@ func hwSummary(n *Node) string {
 func (s *Server) systemPrompt(runID string, p *Project, n *Node) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `You are an autonomous Claude Code agent on machine %q (%s; capabilities: %s; roles: %s). Your agent id is %q.
-You are part of MultiClaude: a swarm of Claude Code agents on several machines working on the same git repository, coordinated by a central server with an issue board. Humans supervise through the board and the project chat.
+You are part of MultiClaude: a swarm of Claude Code agents on several machines working on the same project (git repositories), coordinated by a central server with an issue board. Humans supervise through the board and the project chat.
 
 Coordination rules:
 - The "multiclaude" MCP tools are your interface to the board and chat: list_issues, get_issue, create_issue, update_issue, comment_issue, complete_work, block_issue, review_verdict, post_chat, read_chat, list_agents.
 - Stay within the scope of your assignment. Record other work you discover as new issues (create_issue) with enough context for another agent; set "requires" only when specific hardware is needed (see "Hardware routing" below), and "depends_on" for ordering.
 - Large work: split it into independent issues so several machines can work in parallel, and/or use subagents (Task tool) inside your own assignment.
-- Other agents push to the same repository concurrently. Only push your own branch unless told otherwise. Never force-push the default branch %q.
+- Other agents push to the same repositories concurrently. Only push your own branch unless told otherwise. Never force-push the default branch %q.
 - Human instructions arriving in this conversation (marked as project chat messages) take priority. Answer them briefly and continue.
 - Other agents work on this project at the same time. Coordinate with them directly instead of duplicating or colliding with their work: post_chat with to="<agent id>" (one agent, e.g. "machine/abc123"), to="<machine>" (that machine's agents) or without "to" (every running agent + humans). list_agents shows who is running and what they do. Use it for interface agreements, heads-ups about shared files, questions and handoffs. Messages from agents arrive in this conversation marked "[Message from agent …]"; answer with post_chat when an answer is needed, keep it short, and don't reply to acknowledgements. Agents that have finished cannot receive messages — use comment_issue / create_issue for durable notes.
 - Git LFS is available on the server; track large binary files with git lfs.
@@ -69,15 +69,87 @@ var reviewModeText = map[string]string{
 // (exact clone URL, local checkout path) are appended by the runner.
 func (s *Server) projectContext(p *Project) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\nProject:\n- Name: %s\n- Slug: %s (git repository %s.git on the MultiClaude server; it is the \"origin\" remote of your checkout)\n- Default branch: %s\n",
-		p.Name, p.Slug, p.Slug, p.DefaultBranch)
+	repos := s.projectRepos(p)
+	if len(repos) <= 1 {
+		fmt.Fprintf(&b, "\nProject:\n- Name: %s\n- Slug: %s (git repository %s.git on the MultiClaude server; it is the \"origin\" remote of your checkout)\n- Default branch: %s\n",
+			p.Name, p.Slug, p.Slug, p.DefaultBranch)
+	} else {
+		fmt.Fprintf(&b, "\nProject:\n- Name: %s\n- Slug: %s\n", p.Name, p.Slug)
+	}
 	if rm, ok := reviewModeText[p.ReviewMode]; ok {
 		fmt.Fprintf(&b, "- Review mode: %s\n", rm)
 	}
 	if d := strings.TrimSpace(p.Description); d != "" {
 		fmt.Fprintf(&b, "- Description:\n%s\n", d)
 	}
+	b.WriteString(repoContext(repos))
 	return b.String()
+}
+
+// repoContext explains the repositories and their mirrors to agents.
+func repoContext(repos []*Repo) string {
+	var b strings.Builder
+	multi := len(repos) > 1
+	public := false
+	if multi {
+		b.WriteString("\nRepositories (this project consists of several git repositories; your workspace has each checked out in a subdirectory named after it):\n")
+	}
+	for _, r := range repos {
+		if multi {
+			fmt.Fprintf(&b, "- %s/ — origin %s, default branch %s", r.Name, r.CloneURL, r.DefaultBranch)
+			if r.Primary {
+				b.WriteString(" (primary)")
+			}
+			if d := strings.TrimSpace(r.Description); d != "" {
+				b.WriteString(": " + d)
+			}
+			b.WriteString("\n")
+		}
+		for _, m := range r.Mirrors {
+			if !m.Enabled {
+				continue
+			}
+			what := "its default branch " + r.DefaultBranch + " and tags"
+			if m.Mode == "all" {
+				what = "all branches and tags"
+			}
+			vis := ""
+			switch m.Visibility {
+			case "public":
+				public, vis = true, "PUBLIC; "
+			case "private":
+				vis = "private; "
+			}
+			name := "- The repository"
+			if multi {
+				name = "  " + r.Name
+			}
+			fmt.Fprintf(&b, "%s is mirrored to %s (%s%s are pushed automatically by the server).\n", name, strings.TrimSuffix(m.URL, ".git"), vis, what)
+		}
+	}
+	if multi {
+		b.WriteString(`- Branches: an issue uses the branch issue-<number> in every repository it changes. Commit and push inside each repository you change (git -C <repo> push -u origin issue-<number>); leave the other repositories untouched. When the issue is approved the server merges issue-<number> of every repository together (or none of them if one conflicts), so changes spanning repositories land at once.
+- Keep cross-repository changes consistent (e.g. an API change and its callers in the same issue). Each repository has its own default branch; merge it into your branch when it moved on.
+`)
+	}
+	if hasMirror(repos) {
+		b.WriteString("- Mirrors are one-way copies maintained by the server: never add them as remotes or push to them yourself; everything goes through origin.\n")
+	}
+	if public {
+		b.WriteString("- ⚠ A PUBLIC mirror means everything merged into its default branch becomes visible to the whole internet. Never commit secrets, credentials, tokens, private keys, personal data or internal hostnames/IPs; use environment variables or untracked config files, and keep .gitignore up to date.\n")
+	}
+	return b.String()
+}
+
+func hasMirror(repos []*Repo) bool {
+	for _, r := range repos {
+		for _, m := range r.Mirrors {
+			if m.Enabled {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) issueContext(i *Issue) string {
@@ -128,6 +200,15 @@ func (s *Server) buildAssignment(runID, kind string, p *Project, i *Issue, n *No
 		SystemPrompt: s.systemPrompt(runID, p, n),
 		Model:        n.Model,
 	}
+	repos := s.projectRepos(p)
+	for _, r := range repos {
+		dir := ""
+		if len(repos) > 1 {
+			dir = r.Name
+		}
+		a.Repos = append(a.Repos, proto.RepoSpec{Name: r.Name, URL: r.CloneURL, Dir: dir, BaseBranch: r.DefaultBranch})
+	}
+	multi := len(repos) > 1
 	if i != nil {
 		a.Branch = i.Branch
 	}
@@ -154,6 +235,9 @@ Steps:
    - block_issue with a precise reason and what a human needs to provide.
    Then end your turn with a one-paragraph summary. Ending without either call counts as a failed attempt.`,
 			s.issueContext(i), a.Branch, p.DefaultBranch, i.Number, afterComplete(p))
+		if multi {
+			a.Prompt += fmt.Sprintf("\n\nMulti-repository project: branch %[1]q is checked out in every repository subdirectory (created from that repository's default branch). Change only the repositories the issue needs; commit and push %[1]q in each of them (git -C <repo> push -u origin %[1]s). The default branch named above is the primary repository's — use each repository's own default branch for merges.", a.Branch)
+		}
 	case "review":
 		a.Prompt = fmt.Sprintf(`Your assignment (a "review" session) — you are the reviewer for:
 
@@ -175,6 +259,9 @@ Steps:
    - "request_changes" with concrete, actionable feedback (what is wrong, where, what "done" looks like) → the issue goes back to todo and the next worker gets your comment.
    Then end your turn with a short summary. Ending without a verdict counts as a failed review attempt.`,
 			s.issueContext(i), a.Branch, p.DefaultBranch, i.Number)
+		if multi {
+			a.Prompt += fmt.Sprintf("\n\nMulti-repository project: inspect every repository subdirectory that has commits on %[1]q (for d in */; do git -C \"$d\" log --oneline origin/HEAD..HEAD; done — or compare against each repository's default branch). Your verdict covers all of them together; they are merged at once.", a.Branch)
+		}
 	case "chat":
 		a.Prompt = prompt
 	}

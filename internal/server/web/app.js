@@ -166,7 +166,8 @@ function renderSidebar() {
     h("div", { class: "sidebar-foot" },
       h("div", { class: "row", style: { gap: "6px", marginBottom: "4px" } }, "👤 ", h("b", null, S.user ? S.user.username : ""),
         h("a", { href: "#", style: { marginLeft: "auto" }, onclick: async e => { e.preventDefault(); await api("POST", "/api/logout"); location.href = "/"; } }, "Log out")),
-      `v${S.overview.version || ""} · spent ${money(S.overview.total_cost_usd)}`),
+      h("span", null, `${S.overview.version || ""} · spent ${money(S.overview.total_cost_usd)}`),
+      S.overview.latest_version ? h("div", null, h("a", { href: "https://github.com/infernitytech/multiclaude/releases", target: "_blank", rel: "noopener" }, `⬆ ${S.overview.latest_version} available`)) : null),
   ]);
   sb.querySelectorAll(".nav a").forEach(a => {
     const href = a.getAttribute("href");
@@ -990,30 +991,38 @@ function runView(id) {
 
 // ---------- code browser ----------
 function codeView(info, params) {
-  const p = info.project, slug = p.slug;
-  const ref = params.get("ref") || p.default_branch;
+  const p = { ...info.project }, slug = p.slug;
+  const repo = params.get("repo") || "";
   const path = params.get("path") || "";
   const mode = params.get("commit") ? "commit" : params.get("file") ? "file" : params.get("view") || "files";
   const el = h("div", { class: "content" });
-  const q = o => `/p/${slug}/code?` + new URLSearchParams(Object.fromEntries(Object.entries({ ref, ...o }).filter(([, v]) => v))).toString();
+  let ref = params.get("ref") || "";
+  const rq = repo ? `repo=${encodeURIComponent(repo)}&` : "";
+  const q = o => `/p/${slug}/code?` + new URLSearchParams(Object.fromEntries(Object.entries({ repo, ref, ...o }).filter(([, v]) => v))).toString();
 
   async function load() {
-    const branches = await api("GET", `/api/projects/${slug}/repo/branches`);
+    const repos = await api("GET", `/api/projects/${slug}/repos`);
+    const cur = repos.find(r => r.name === repo) || repos[0];
+    p.default_branch = cur.default_branch;
+    if (!ref) ref = cur.default_branch;
+    const branches = await api("GET", `/api/projects/${slug}/repo/branches?${rq}`);
     const refSel = h("select", { style: { width: "auto" }, onchange: e => go(q({ ref: e.target.value, path, view: mode === "file" ? "files" : mode })) },
       branches.map(b => h("option", { value: b.name, selected: b.name === ref }, b.name)));
-    const nav = h("div", { class: "row", style: { marginBottom: "14px" } }, refSel,
+    const repoSel = repos.length > 1 ? h("select", { style: { width: "auto", fontWeight: "600" }, title: "Repository", onchange: e => go(`/p/${slug}/code?` + (e.target.value === repos[0].name ? "" : "repo=" + encodeURIComponent(e.target.value))) },
+      repos.map(r => h("option", { value: r.name, selected: r === cur }, "📦 " + r.name))) : null;
+    const nav = h("div", { class: "row", style: { marginBottom: "14px" } }, repoSel, refSel,
       h("div", { class: "seg" }, [["files", "Files"], ["log", "Commits"], ["branches", `Branches (${branches.length})`]].map(([k, n]) =>
         h("button", { class: (mode === k || (k === "files" && mode === "file") || (k === "log" && mode === "commit")) ? "on" : "", onclick: () => go(q({ view: k })) }, n))));
     el.innerHTML = "";
     el.appendChild(nav);
     if (mode === "files" || mode === "file") {
-      const crumbs = h("div", { class: "breadcrumb", style: { marginBottom: "10px" } }, link(q({}), slug));
+      const crumbs = h("div", { class: "breadcrumb", style: { marginBottom: "10px" } }, link(q({}), repo || slug));
       let acc = "";
       for (const part of path.split("/").filter(Boolean)) { acc += (acc ? "/" : "") + part; add(crumbs, [" / ", link(q({ path: acc }), part)]); }
       el.appendChild(crumbs);
       if (mode === "file") {
-        const b = await api("GET", `/api/projects/${slug}/repo/blob?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(path)}`);
-        const raw = `/api/projects/${slug}/repo/blob?raw=1&ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(path)}`;
+        const b = await api("GET", `/api/projects/${slug}/repo/blob?${rq}ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(path)}`);
+        const raw = `/api/projects/${slug}/repo/blob?${rq}raw=1&ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(path)}`;
         el.appendChild(h("div", { class: "row hint", style: { marginBottom: "8px" } }, `${b.size} bytes`, h("span", { class: "spacer" }),
           b.lfs ? h("a", { class: "btn small", href: b.lfs.href, download: path.split("/").pop() }, `Download LFS object (${(b.lfs.size / 1048576).toFixed(1)} MB)`) : h("a", { class: "btn small", href: raw }, "Download")));
         if (b.lfs) el.appendChild(h("div", { class: "card empty" }, `Git LFS object ${b.lfs.oid.slice(0, 12)}…`));
@@ -1024,7 +1033,7 @@ function codeView(info, params) {
           el.appendChild(h("div", { class: "code-view" }, pre));
         }
       } else {
-        const entries = await api("GET", `/api/projects/${slug}/repo/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(path)}`);
+        const entries = await api("GET", `/api/projects/${slug}/repo/tree?${rq}ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(path)}`);
         entries.sort((a, b) => (a.type === "tree" ? 0 : 1) - (b.type === "tree" ? 0 : 1) || a.name.localeCompare(b.name));
         el.appendChild(h("table", { class: "list" }, entries.map(e => {
           const full = (path ? path + "/" : "") + e.name;
@@ -1034,17 +1043,17 @@ function codeView(info, params) {
         })));
         const readme = entries.find(e => /^readme\.md$/i.test(e.name));
         if (readme) {
-          const b = await api("GET", `/api/projects/${slug}/repo/blob?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent((path ? path + "/" : "") + readme.name)}`);
+          const b = await api("GET", `/api/projects/${slug}/repo/blob?${rq}ref=${encodeURIComponent(ref)}&path=${encodeURIComponent((path ? path + "/" : "") + readme.name)}`);
           if (b.text) el.appendChild(h("div", { class: "card pad md", style: { marginTop: "14px" }, html: md(b.text) }));
         }
       }
     } else if (mode === "log") {
-      const log = await api("GET", `/api/projects/${slug}/repo/log?ref=${encodeURIComponent(ref)}`);
+      const log = await api("GET", `/api/projects/${slug}/repo/log?${rq}ref=${encodeURIComponent(ref)}`);
       el.appendChild(h("table", { class: "list" }, log.map(c => h("tr", { class: "click", onclick: () => go(q({ commit: c.sha })) },
         h("td", { class: "mono hint", style: { width: "90px" } }, c.sha.slice(0, 8)), h("td", null, c.subject, " ", c.refs && h("span", { class: "chip" }, c.refs)),
         h("td", { class: "hint" }, c.author), h("td", { class: "hint", style: { whiteSpace: "nowrap" } }, ago(c.date))))));
     } else if (mode === "commit") {
-      const txt = await api("GET", `/api/projects/${slug}/repo/commit?sha=${params.get("commit")}`);
+      const txt = await api("GET", `/api/projects/${slug}/repo/commit?${rq}sha=${params.get("commit")}`);
       const pre = h("pre");
       for (const l of txt.split("\n")) {
         const cls = l.startsWith("+++") || l.startsWith("---") || l.startsWith("diff ") ? "fhead" : l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : l.startsWith("@@") ? "hunk" : "";
@@ -1093,6 +1102,8 @@ function settingsView(info) {
           await api("PATCH", `/api/projects/${p.slug}`, { name: name.value, description: desc.value, instructions: instr.value, review_mode: review.value, dispatch: dispatch.checked });
           toast("Saved"); loadOverview();
         } }, "Save"))),
+    h("div", { class: "section-title" }, "Repositories & mirrors"),
+    reposSection(p),
     h("div", { class: "section-title" }, "Machines assigned to this project"),
     h("div", { class: "card pad" }, S.overview.nodes.length ? nodes : h("div", { class: "hint" }, "No machines registered yet. ", link("/machines", "Install a runner."))),
     h("div", { class: "section-title" }, "Danger zone"),
@@ -1102,7 +1113,78 @@ function settingsView(info) {
         modal(`Delete ${p.name}?`, h("div", null, h("p", null, "Type the project slug to confirm:"), inp), close => [h("button", { class: "btn", onclick: close }, "Cancel"),
           h("button", { class: "btn danger solid", onclick: async () => { await api("DELETE", `/api/projects/${p.slug}?confirm=${encodeURIComponent(inp.value)}`); close(); await loadOverview(); go("/"); } }, "Delete")]);
       } }, "Delete project")))]);
-  return { el };
+  return { el, onEvent: ev => { if (ev.type === "repos" && ev.project_id === p.id) el.querySelector(".repos-sec")?.reload?.(); } };
+}
+
+function reposSection(p) {
+  const box = h("div", { class: "repos-sec" });
+  box.reload = async () => {
+    const repos = await api("GET", `/api/projects/${p.slug}/repos`);
+    box.innerHTML = "";
+    repos.forEach(r => box.appendChild(repoCard(p, r, box.reload)));
+    box.appendChild(addRepoCard(p, box.reload));
+  };
+  box.reload();
+  return box;
+}
+
+function mirrorState(m) {
+  if (!m.enabled) return h("span", { class: "chip" }, "paused");
+  if (m.last_status === "ok") return h("span", { class: "chip ok" }, "✓ synced " + ago(m.last_at));
+  if (m.last_status === "error") return h("span", { class: "chip bad", title: m.last_error }, "✗ failed " + ago(m.last_at));
+  return h("span", { class: "chip" }, "pending…");
+}
+
+function repoCard(p, r, reload) {
+  const base = `/api/projects/${p.slug}/repos/${encodeURIComponent(r.name)}`;
+  const clone = `${location.origin}${r.clone_path}`;
+  const mUrl = h("input", { placeholder: "owner/name (GitHub) or https://….git" });
+  const mTok = h("input", { type: "password", placeholder: "token (default: server-wide GitHub token)", autocomplete: "off" });
+  const mMode = h("select", { style: { width: "auto" } }, h("option", { value: "default" }, "default branch + tags"), h("option", { value: "all" }, "all branches & tags (forced)"));
+  const mCreate = h("select", { style: { width: "auto" } }, h("option", { value: "" }, "repo exists"), h("option", { value: "private" }, "create private"), h("option", { value: "public" }, "create public"));
+  return h("div", { class: "card pad", style: { marginBottom: "12px" } },
+    h("div", { class: "row" }, h("b", null, "📦 " + r.name), r.primary ? h("span", { class: "chip" }, "primary") : null,
+      h("span", { class: "hint" }, "default branch " + r.default_branch), h("span", { class: "spacer" }),
+      link(`/p/${p.slug}/code${r.primary ? "" : "?repo=" + encodeURIComponent(r.name)}`, "Browse"),
+      r.primary ? null : h("button", { class: "btn small danger ghost", onclick: async () => {
+        if (confirm(`Remove repository ${r.name}? It is moved to the server's trash folder.`)) { await api("DELETE", base); reload(); }
+      } }, "Remove")),
+    r.description ? h("div", { class: "hint", style: { margin: "4px 0" } }, r.description) : null,
+    h("div", { class: "install", style: { margin: "8px 0", padding: "4px 10px", fontSize: "12px" } }, h("code", null, `git clone ${clone}`), h("button", { class: "btn small ghost", onclick: () => copy(`git clone ${clone}`) }, "copy")),
+    h("div", { class: "k hint", style: { margin: "10px 0 4px", fontWeight: "600" } }, "Mirrors"),
+    r.mirrors.length ? h("div", null, r.mirrors.map(m => h("div", { class: "mirror-row" },
+      h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+        h("a", { href: m.url.replace(/\.git$/, ""), target: "_blank", rel: "noopener", style: { fontWeight: "600" } }, m.url.replace(/^https:\/\//, "").replace(/\.git$/, "")),
+        m.visibility === "public" ? h("span", { class: "chip warn" }, "public") : m.visibility === "private" ? h("span", { class: "chip" }, "private") : null,
+        h("span", { class: "hint" }, m.mode === "all" ? "all branches & tags" : "default branch + tags"),
+        mirrorState(m), h("span", { class: "spacer" }),
+        h("button", { class: "btn small ghost", onclick: async () => { toast("Syncing…"); await api("POST", `${base}/mirrors/${m.id}/sync`); reload(); } }, "Sync now"),
+        h("button", { class: "btn small ghost", onclick: async () => { await api("PATCH", `${base}/mirrors/${m.id}`, { enabled: !m.enabled }); reload(); } }, m.enabled ? "Pause" : "Resume"),
+        h("button", { class: "btn small danger ghost", onclick: async () => { if (confirm("Remove this mirror? (The GitHub repository itself is not touched.)")) { await api("DELETE", `${base}/mirrors/${m.id}`); reload(); } } }, "Remove")),
+      m.last_status === "error" ? h("div", { class: "hint", style: { color: "var(--bad)", whiteSpace: "pre-wrap", marginTop: "4px" } }, m.last_error) : null))) :
+      h("div", { class: "hint" }, "No mirrors. Mirrors are one-way copies (e.g. on GitHub) that the server updates after every push and merge."),
+    h("div", { class: "mirror-form" }, mUrl, mTok, mMode, mCreate,
+      h("button", { class: "btn", onclick: async () => {
+        if (!mUrl.value.trim()) return toast("Enter owner/name or a URL", true);
+        await api("POST", `${base}/mirrors`, { url: mUrl.value, token: mTok.value, mode: mMode.value, create: !!mCreate.value, private: mCreate.value === "private" });
+        toast("Mirror added — first sync running"); reload();
+      } }, "Add mirror")));
+}
+
+function addRepoCard(p, reload) {
+  const name = h("input", { placeholder: "name, e.g. backend" });
+  const desc = h("input", { placeholder: "what it contains (agents see this)" });
+  const branch = h("input", { placeholder: "main", style: { width: "110px" } });
+  const imp = h("input", { placeholder: "import from URL (optional)" });
+  const tok = h("input", { type: "password", placeholder: "token for a private import (optional)", autocomplete: "off" });
+  return h("details", { class: "card pad" }, h("summary", { style: { cursor: "pointer", fontWeight: "600" } }, "+ Add repository"),
+    h("div", { style: { display: "grid", gap: "8px", marginTop: "10px" } },
+      h("div", { class: "row", style: { gap: "6px" } }, name, branch), desc, h("div", { class: "row", style: { gap: "6px" } }, imp, tok),
+      h("div", { class: "hint" }, "Agents get every repository of the project checked out side by side and work on branch issue-N in the ones they change; approved issues are merged in all repositories at once."),
+      h("div", { class: "row", style: { justifyContent: "flex-end" } }, h("button", { class: "btn primary", onclick: async () => {
+        await api("POST", `/api/projects/${p.slug}/repos`, { name: name.value, description: desc.value, default_branch: branch.value || "main", import_url: imp.value, import_token: tok.value });
+        toast("Repository created"); reload();
+      } }, "Create repository"))));
 }
 
 // ---------- machines ----------
@@ -1225,6 +1307,7 @@ function accountView() {
             } }, "Delete")))))),
         h("div", { class: "row", style: { gap: "8px" } }, nu, nupw,
           h("button", { class: "btn", onclick: async () => { await api("POST", "/api/users", { username: nu.value, password: nupw.value }); toast("User added"); render(); } }, "Add user"))),
+      githubCard(),
       h("div", { class: "card pad", style: { maxWidth: "640px" } },
         h("b", null, "Git access"),
         h("p", { class: "hint", style: { margin: "6px 0" } }, "Clone a project's repository with your username and password (git asks for them; a credential helper remembers them):"),
@@ -1233,6 +1316,22 @@ function accountView() {
     ]);
   }
   return { el, load: render };
+}
+
+function githubCard() {
+  const card = h("div", { class: "card pad", style: { marginBottom: "18px", maxWidth: "640px" } });
+  const render = st => {
+    const tok = h("input", { type: "password", placeholder: st.has_token ? "•••••• (stored) — paste a new one to replace" : "GitHub token", autocomplete: "off" });
+    card.innerHTML = "";
+    add(card, [h("b", null, "GitHub"),
+      h("p", { class: "hint", style: { margin: "6px 0" } }, "Server-wide token for mirrors and private imports (a mirror can also have its own). Fine-grained token: the repositories (or all of the organization) with Contents: read & write, plus Administration: read & write if MultiClaude should create mirror repositories."),
+      st.has_token ? h("div", { style: { margin: "6px 0" } }, st.error ? h("span", { class: "chip bad" }, "✗ " + st.error) : h("span", { class: "chip ok" }, "✓ authenticated as " + st.login)) : null,
+      h("div", { class: "row", style: { gap: "6px" } }, tok,
+        h("button", { class: "btn", onclick: async () => { render(await api("PUT", "/api/settings/github", { token: tok.value })); toast("Saved"); } }, "Save"),
+        st.has_token ? h("button", { class: "btn ghost danger", onclick: async () => { render(await api("PUT", "/api/settings/github", { token: "" })); } }, "Remove") : null)]);
+  };
+  api("GET", "/api/settings/github").then(render);
+  return card;
 }
 
 // ---------- login ----------

@@ -40,6 +40,7 @@ type session struct {
 
 	events chan proto.RunEvent
 	dir    string
+	repos  []wsRepo
 }
 
 func newSession(r *Runner, a *proto.Assignment) *session {
@@ -111,11 +112,18 @@ func (s *session) shipEvents(done <-chan struct{}) {
 	}
 }
 
-func (s *session) git(args ...string) (string, error) {
+// wsRepo is one repository checked out in the workspace.
+type wsRepo struct {
+	spec   proto.RepoSpec
+	dir    string
+	branch string // branch this session works on in this repo
+}
+
+func (s *session) gitIn(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = s.dir
+	cmd.Dir = dir
 	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true", "SSH_ASKPASS="), s.r.gitEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -124,113 +132,170 @@ func (s *session) git(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// repoSpecs returns the repositories of the assignment (one for older servers).
+func (s *session) repoSpecs() []proto.RepoSpec {
+	if len(s.a.Repos) > 0 {
+		return s.a.Repos
+	}
+	return []proto.RepoSpec{{Name: s.a.ProjectSlug, URL: s.a.RepoURL, BaseBranch: s.a.BaseBranch}}
+}
+
+func (s *session) multiRepo() bool {
+	sp := s.repoSpecs()
+	return len(sp) > 1 || sp[0].Dir != ""
+}
+
 // environmentPrompt adds the facts only the runner knows to the system prompt.
 func (s *session) environmentPrompt() string {
-	return fmt.Sprintf(`
-Environment:
-- Git remote (origin): %s
-- Local checkout (your working directory): %s
-- MultiClaude server: %s (board: %s/p/%s)
-- Current branch: %s
-- Git authentication to origin is already configured through GIT_CONFIG_* environment variables; just use git normally. Never print, log or commit those values.
-`, s.r.cfg.Server+s.a.RepoURL, s.dir, s.r.cfg.Server, s.r.cfg.Server, s.a.ProjectSlug, s.a.Branch)
+	var b strings.Builder
+	b.WriteString("\nEnvironment:\n")
+	if !s.multiRepo() {
+		fmt.Fprintf(&b, "- Git remote (origin): %s\n- Local checkout (your working directory): %s\n", s.r.cfg.Server+s.a.RepoURL, s.dir)
+	} else {
+		fmt.Fprintf(&b, "- Your working directory %s holds one checkout per repository of the project:\n", s.dir)
+		for _, rp := range s.repos {
+			fmt.Fprintf(&b, "    %s/  → origin %s (branch %s, default branch %s)\n", rp.spec.Dir, s.r.cfg.Server+rp.spec.URL, rp.branch, rp.spec.BaseBranch)
+		}
+		b.WriteString("  The workspace root itself is not a git repository: run git inside the repo directories (git -C <dir> …).\n")
+	}
+	fmt.Fprintf(&b, "- MultiClaude server: %s (board: %s/p/%s)\n- Current branch: %s\n", s.r.cfg.Server, s.r.cfg.Server, s.a.ProjectSlug, s.a.Branch)
+	b.WriteString("- Git authentication to the MultiClaude remotes is already configured through GIT_CONFIG_* environment variables; just use git normally. Never print, log or commit those values.\n")
+	return b.String()
 }
 
 func hasLFS() bool { _, err := exec.LookPath("git-lfs"); return err == nil }
 
 func (s *session) prepare() error {
-	url := s.r.cfg.Server + s.a.RepoURL
-	if _, err := os.Stat(filepath.Join(s.dir, ".git")); err != nil {
-		os.MkdirAll(filepath.Dir(s.dir), 0o755)
-		os.RemoveAll(s.dir)
+	if s.multiRepo() {
+		os.MkdirAll(s.dir, 0o755)
+	}
+	s.repos = nil
+	for _, sp := range s.repoSpecs() {
+		rp := wsRepo{spec: sp, dir: filepath.Join(s.dir, sp.Dir), branch: s.a.Branch}
+		if s.a.Kind == "chat" || s.a.Branch == s.a.BaseBranch {
+			rp.branch = sp.BaseBranch // no issue branch: every repo on its own default branch
+		}
+		if err := s.prepareRepo(rp); err != nil {
+			if len(s.repoSpecs()) > 1 {
+				return fmt.Errorf("repository %s: %w", sp.Name, err)
+			}
+			return err
+		}
+		s.repos = append(s.repos, rp)
+	}
+	return nil
+}
+
+func (s *session) prepareRepo(rp wsRepo) error {
+	url := s.r.cfg.Server + rp.spec.URL
+	g := func(args ...string) (string, error) { return s.gitIn(rp.dir, args...) }
+	if _, err := os.Stat(filepath.Join(rp.dir, ".git")); err != nil {
+		os.MkdirAll(filepath.Dir(rp.dir), 0o755)
+		os.RemoveAll(rp.dir)
 		s.info("cloning %s", url)
-		cmd := exec.Command("git", "clone", url, s.dir)
-		cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true", "SSH_ASKPASS="), s.r.gitEnv()...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("clone failed: %v: %s", err, out)
+		if _, err := s.gitIn(filepath.Dir(rp.dir), "clone", url, rp.dir); err != nil {
+			return fmt.Errorf("clone failed: %v", err)
 		}
 		if hasLFS() {
-			s.git("lfs", "install", "--local")
+			g("lfs", "install", "--local")
 		}
 	}
-	s.git("remote", "set-url", "origin", url)
+	g("remote", "set-url", "origin", url)
 	name := s.r.cfg.Name
 	if name == "" {
 		name, _ = os.Hostname()
 	}
-	s.git("config", "user.name", name+" (Claude via MultiClaude)")
-	s.git("config", "user.email", strings.ReplaceAll(strings.ToLower(name), " ", "-")+"@multiclaude.local")
-	if _, err := s.git("fetch", "origin", "--prune"); err != nil {
+	g("config", "user.name", name+" (Claude via MultiClaude)")
+	g("config", "user.email", strings.ReplaceAll(strings.ToLower(name), " ", "-")+"@multiclaude.local")
+	if _, err := g("fetch", "origin", "--prune"); err != nil {
 		return err
 	}
-	s.git("merge", "--abort")
-	s.git("rebase", "--abort")
-	s.git("reset", "--hard")
-	s.git("clean", "-fd")
-	start := "origin/" + s.a.BaseBranch
-	if _, err := s.git("rev-parse", "--verify", "refs/remotes/origin/"+s.a.Branch); err == nil {
-		start = "origin/" + s.a.Branch
+	g("merge", "--abort")
+	g("rebase", "--abort")
+	g("reset", "--hard")
+	g("clean", "-fd")
+	start := "origin/" + rp.spec.BaseBranch
+	if _, err := g("rev-parse", "--verify", "refs/remotes/origin/"+rp.branch); err == nil {
+		start = "origin/" + rp.branch
 	}
-	if _, err := s.git("checkout", "-B", s.a.Branch, start); err != nil {
+	if _, err := g("checkout", "-B", rp.branch, start); err != nil {
 		return err
 	}
 	if hasLFS() {
-		if _, err := s.git("lfs", "pull"); err != nil {
+		if _, err := g("lfs", "pull"); err != nil {
 			s.info("git lfs pull failed: %v", err)
 		}
 	}
-	s.info("workspace %s on %s (from %s)", s.dir, s.a.Branch, start)
+	s.info("workspace %s on %s (from %s)", rp.dir, rp.branch, start)
 	return nil
 }
 
-// finalizeGit pushes the branch. With salvage (run failed or was cancelled)
-// uncommitted changes on an issue branch are committed as WIP so the next
-// attempt can continue; after successful runs leftovers are usually build
-// artifacts and are left out (the next run starts from a clean checkout).
+// finalizeGit pushes the branch in every repo that has new commits. With
+// salvage (run failed or was cancelled) uncommitted changes on an issue branch
+// are committed as WIP so the next attempt can continue; after successful runs
+// leftovers are usually build artifacts and are left out (the next run starts
+// from a clean checkout).
 func (s *session) finalizeGit(salvage bool) (bool, string) {
-	onIssueBranch := s.a.Branch != s.a.BaseBranch
-	if st, _ := s.git("status", "--porcelain"); st != "" {
-		if salvage && onIssueBranch && s.a.Kind == "work" {
-			s.git("add", "-A")
-			if _, err := s.git("commit", "-m", fmt.Sprintf("WIP: uncommitted changes salvaged from agent run %s", s.a.RunID)); err == nil {
-				s.info("salvaged uncommitted changes into a WIP commit")
-			}
-		} else {
-			s.info("leaving uncommitted changes out of the push:\n%s", lastN(st, 1500))
+	pushedAny, head := false, ""
+	for i, rp := range s.repos {
+		p, h := s.finalizeRepo(rp, salvage)
+		pushedAny = pushedAny || p
+		if i == 0 {
+			head = h
 		}
 	}
-	head, _ := s.git("rev-parse", "HEAD")
-	remote := "refs/remotes/origin/" + s.a.Branch
+	return pushedAny, head
+}
+
+func (s *session) finalizeRepo(rp wsRepo, salvage bool) (bool, string) {
+	g := func(args ...string) (string, error) { return s.gitIn(rp.dir, args...) }
+	label := rp.branch
+	if len(s.repos) > 1 {
+		label = rp.spec.Name + ":" + rp.branch
+	}
+	onIssueBranch := rp.branch != rp.spec.BaseBranch
+	if st, _ := g("status", "--porcelain"); st != "" {
+		if salvage && onIssueBranch && s.a.Kind == "work" {
+			g("add", "-A")
+			if _, err := g("commit", "-m", fmt.Sprintf("WIP: uncommitted changes salvaged from agent run %s", s.a.RunID)); err == nil {
+				s.info("%s: salvaged uncommitted changes into a WIP commit", label)
+			}
+		} else {
+			s.info("%s: leaving uncommitted changes out of the push:\n%s", label, lastN(st, 1500))
+		}
+	}
+	head, _ := g("rev-parse", "HEAD")
+	remote := "refs/remotes/origin/" + rp.branch
 	ahead := "1"
-	if _, err := s.git("rev-parse", "--verify", remote); err == nil {
-		ahead, _ = s.git("rev-list", "--count", remote+"..HEAD")
-	} else if base, err := s.git("rev-parse", "origin/"+s.a.BaseBranch); err == nil && base == head {
+	if _, err := g("rev-parse", "--verify", remote); err == nil {
+		ahead, _ = g("rev-list", "--count", remote+"..HEAD")
+	} else if base, err := g("rev-parse", "origin/"+rp.spec.BaseBranch); err == nil && base == head {
 		ahead = "0"
 	}
 	if ahead == "0" || ahead == "" {
 		return false, head
 	}
 	push := func() error {
-		_, err := s.git("push", "origin", "HEAD:refs/heads/"+s.a.Branch)
+		_, err := g("push", "origin", "HEAD:refs/heads/"+rp.branch)
 		return err
 	}
 	if err := push(); err != nil {
-		s.info("push rejected, integrating remote changes: %v", err)
-		if _, err := s.git("pull", "--rebase", "origin", s.a.Branch); err != nil {
-			s.git("rebase", "--abort")
-			if _, err := s.git("pull", "--no-rebase", "--no-edit", "origin", s.a.Branch); err != nil {
-				s.git("merge", "--abort")
-				s.info("could not integrate remote changes: %v", err)
+		s.info("%s: push rejected, integrating remote changes: %v", label, err)
+		if _, err := g("pull", "--rebase", "origin", rp.branch); err != nil {
+			g("rebase", "--abort")
+			if _, err := g("pull", "--no-rebase", "--no-edit", "origin", rp.branch); err != nil {
+				g("merge", "--abort")
+				s.info("%s: could not integrate remote changes: %v", label, err)
 				return false, head
 			}
 		}
 		if err := push(); err != nil {
-			s.info("push failed: %v", err)
+			s.info("%s: push failed: %v", label, err)
 			return false, head
 		}
 	}
-	head, _ = s.git("rev-parse", "HEAD")
-	s.info("pushed %s (%s)", s.a.Branch, head[:min(8, len(head))])
+	head, _ = g("rev-parse", "HEAD")
+	s.info("pushed %s (%s)", label, head[:min(8, len(head))])
 	return true, head
 }
 
@@ -240,7 +305,11 @@ func (s *session) run() proto.RunFinish {
 	go func() { s.shipEvents(done); close(shipped) }()
 	defer func() { close(done); <-shipped }()
 
-	s.dir = s.r.acquireWorkspace(s.a.ProjectSlug)
+	wsKey := s.a.ProjectSlug
+	if s.multiRepo() {
+		wsKey += "~multi" // different layout: one subdirectory per repository
+	}
+	s.dir = s.r.acquireWorkspace(wsKey)
 	defer s.r.releaseWorkspace(s.dir)
 	s.info("starting %s run in project %s", s.a.Kind, s.a.ProjectSlug)
 

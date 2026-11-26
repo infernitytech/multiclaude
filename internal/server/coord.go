@@ -155,7 +155,7 @@ func (s *Server) runnerRegister(w http.ResponseWriter, r *http.Request) {
 	s.drain(req.NodeID)
 	s.emit(event{Type: "nodes"})
 	s.logf("node registered: %s (%s) caps=%v roles=%v", req.Name, req.NodeID, req.Capabilities, req.Roles)
-	writeJSON(w, proto.RegisterResponse{NodeID: req.NodeID, NodeToken: newTok})
+	writeJSON(w, proto.RegisterResponse{NodeID: req.NodeID, NodeToken: newTok, ServerVersion: proto.Version})
 }
 
 func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +216,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(cmds) > 0 {
 			s.touch(req.NodeID)
-			writeJSON(w, proto.PollResponse{Commands: cmds})
+			writeJSON(w, proto.PollResponse{Commands: cmds, ServerVersion: proto.Version})
 			return
 		}
 		s.mu.Lock()
@@ -227,7 +227,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 		case <-wc:
 		case <-deadline.C:
 			s.touch(req.NodeID)
-			writeJSON(w, proto.PollResponse{Commands: []proto.Command{}})
+			writeJSON(w, proto.PollResponse{Commands: []proto.Command{}, ServerVersion: proto.Version})
 			return
 		case <-r.Context().Done():
 			return
@@ -629,18 +629,55 @@ func (s *Server) mergeIssue(p *Project, issue *Issue, by string) error {
 	if branch == "" {
 		branch = fmt.Sprintf("issue-%d", issue.Number)
 	}
-	sha, err := s.mergeBranch(p.Slug, p.DefaultBranch, branch, fmt.Sprintf("Merge %s: %s (#%d)", branch, issue.Title, issue.Number))
-	if err != nil {
-		msg := fmt.Sprintf("❌ Merge of `%s` into `%s` failed: %v\n\nPlease merge `origin/%s` into the branch, resolve conflicts and push again.", branch, p.DefaultBranch, err, p.DefaultBranch)
-		if !errors.Is(err, errConflict) {
-			msg = fmt.Sprintf("❌ Merge of `%s` failed: %v", branch, err)
+	repos := s.projectRepos(p)
+	multi := len(repos) > 1
+	fail := func(err error, rp *Repo) error {
+		where := ""
+		if multi {
+			where = " in repository `" + rp.Name + "`"
 		}
-		s.db.Exec(`UPDATE issues SET status='todo', run_id='', updated_at=? WHERE id=?`, now(), issue.ID)
+		msg := fmt.Sprintf("❌ Merge of `%s` into `%s`%s failed: %v\n\nPlease merge `origin/%s` into the branch%s, resolve conflicts and push again. Nothing was merged in any repository.", branch, rp.DefaultBranch, where, err, rp.DefaultBranch, where)
+		if !errors.Is(err, errConflict) {
+			msg = fmt.Sprintf("❌ Merge of `%s`%s failed: %v", branch, where, err)
+		}
+		// Counts as a failed attempt, so an unresolvable conflict can't loop forever.
+		s.db.Exec(`UPDATE issues SET status=CASE WHEN attempts+1>=3 THEN 'blocked' ELSE 'todo' END, attempts=attempts+1, run_id='', updated_at=? WHERE id=?`, now(), issue.ID)
 		s.addComment(issue.ID, "multiclaude", msg)
 		return err
 	}
+	// Check every repo first, so a conflict in one never leaves the others half-merged.
+	var plans []*mergePlan
+	var names []string
+	for _, rp := range repos {
+		pl, err := s.planMerge(rp.Key, rp.DefaultBranch, branch, fmt.Sprintf("Merge %s: %s (#%d)", branch, issue.Title, issue.Number))
+		if errors.Is(err, errNoBranch) {
+			continue // not touched in this repo
+		}
+		if err != nil {
+			return fail(err, rp)
+		}
+		plans = append(plans, pl)
+		if !pl.noop {
+			names = append(names, fmt.Sprintf("`%s` (%s)", rp.Name, short(pl.newSHA)))
+		}
+	}
+	if len(plans) == 0 {
+		return fail(fmt.Errorf("branch %s does not exist on the server (was it pushed?)", branch), repos[0])
+	}
+	for _, pl := range plans {
+		if err := s.applyMerge(pl); err != nil {
+			return fail(err, repos[0])
+		}
+	}
 	s.db.Exec(`UPDATE issues SET status='done', run_id='', updated_at=? WHERE id=?`, now(), issue.ID)
-	s.addComment(issue.ID, "multiclaude", fmt.Sprintf("✅ Merged `%s` into `%s` (%s) — approved by %s.", branch, p.DefaultBranch, short(sha), by))
+	what := fmt.Sprintf("into `%s` (%s)", p.DefaultBranch, short(plans[0].newSHA))
+	if multi {
+		what = "in " + strings.Join(names, ", ")
+		if len(names) == 0 {
+			what = "(no new commits)"
+		}
+	}
+	s.addComment(issue.ID, "multiclaude", fmt.Sprintf("✅ Merged `%s` %s — approved by %s.", branch, what, by))
 	s.workAvailable() // dependants may be unblocked
 	return nil
 }

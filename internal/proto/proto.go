@@ -3,7 +3,8 @@ package proto
 
 import "encoding/json"
 
-const Version = "0.1.0"
+// Version is set at build time (-ldflags "-X multiclaude/internal/proto.Version=v1.2.3").
+var Version = "dev"
 
 type GPU struct {
 	Vendor   string `json:"vendor"`
@@ -42,6 +43,8 @@ type RegisterResponse struct {
 	NodeID string `json:"node_id"`
 	// NodeToken is set only when the machine was just enrolled; the runner stores it.
 	NodeToken string `json:"node_token,omitempty"`
+	// ServerVersion lets runners update themselves to the matching version.
+	ServerVersion string `json:"server_version,omitempty"`
 }
 
 type PollRequest struct {
@@ -59,7 +62,8 @@ type Command struct {
 }
 
 type PollResponse struct {
-	Commands []Command `json:"commands"`
+	Commands      []Command `json:"commands"`
+	ServerVersion string    `json:"server_version,omitempty"`
 }
 
 // Assignment fully describes one Claude Code run. Prompts are built by the
@@ -75,6 +79,17 @@ type Assignment struct {
 	SystemPrompt  string `json:"system_prompt"`
 	ResumeSession string `json:"resume_session,omitempty"`
 	Model         string `json:"model,omitempty"`
+	// Repos lists every repository of the project (multi-repo projects).
+	// Older servers leave it empty: then RepoURL/BaseBranch describe the only repo.
+	Repos []RepoSpec `json:"repos,omitempty"`
+}
+
+// RepoSpec is one repository in the agent's workspace.
+type RepoSpec struct {
+	Name       string `json:"name"`
+	URL        string `json:"url"`         // path on the server, e.g. /git/game/assets.git
+	Dir        string `json:"dir"`         // relative to the workspace root; "" = the root itself
+	BaseBranch string `json:"base_branch"` // the repo's default branch
 }
 
 type RunEvent struct {

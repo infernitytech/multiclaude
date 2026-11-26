@@ -144,13 +144,24 @@ func (s *Server) briefing(p *Project) string {
 	section("Blocked (needs a human)", issueQuery{Status: "blocked", Order: "updated", Limit: 8}, plain)
 	section("Recently completed", issueQuery{Status: "done", Order: "updated", Limit: 10}, plain)
 
-	if commits, err := s.gitLog(p.Slug, p.DefaultBranch, 8); err == nil && len(commits) > 0 {
-		fmt.Fprintf(&b, "- Latest commits on %s:\n", p.DefaultBranch)
-		for _, c := range commits {
-			fmt.Fprintf(&b, "    %s %s (%s)\n", short(c.SHA), c.Subject, c.Author)
+	repos := s.projectRepos(p)
+	for i, rp := range repos {
+		n := 8
+		if i > 0 {
+			n = 4
 		}
-	} else {
-		b.WriteString("- The repository has no commits yet besides the initial one — you may be laying the foundation.\n")
+		label := rp.DefaultBranch
+		if len(repos) > 1 {
+			label = rp.Name + " " + rp.DefaultBranch
+		}
+		if commits, err := s.gitLog(rp.Key, rp.DefaultBranch, n); err == nil && len(commits) > 0 {
+			fmt.Fprintf(&b, "- Latest commits on %s:\n", label)
+			for _, c := range commits {
+				fmt.Fprintf(&b, "    %s %s (%s)\n", short(c.SHA), c.Subject, c.Author)
+			}
+		} else {
+			fmt.Fprintf(&b, "- %s has no commits yet besides the initial one — you may be laying the foundation.\n", label)
+		}
 	}
 	b.WriteString(`- Shared memory: read CLAUDE.md and README.md in the repo first if they exist; they hold the project's conventions, architecture and build/test commands. When you establish something future agents must know (layout, conventions, how to build/test/run), add it to CLAUDE.md as part of your change — concise and factual. Look at recently completed issues (get_issue) for decisions that were already made.
 `)

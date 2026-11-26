@@ -1,22 +1,30 @@
 # Fully qualified so podman-built images load into Docker as plain "multiclaude:latest".
 IMAGE ?= docker.io/library/multiclaude:latest
 GO ?= go
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X multiclaude/internal/proto.Version=$(VERSION)
 
-.PHONY: build runners image image-tar serve-image deploy-nas dev clean
+.PHONY: build runners image image-tar serve-image deploy-nas release dev clean
 
 build:
-	$(GO) build -o bin/ ./cmd/...
+	$(GO) build -ldflags="$(LDFLAGS)" -o bin/ ./cmd/...
 
 # Cross-compile runner binaries into dist/ (served by `make dev`)
 runners:
 	@for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
 	  os=$${t%/*}; arch=$${t#*/}; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags="-s -w" -o dist/multiclaude-runner-$$os-$$arch ./cmd/multiclaude-runner; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags="$(LDFLAGS)" -o dist/multiclaude-runner-$$os-$$arch ./cmd/multiclaude-runner; \
 	done
 
 # Build the container image (docker or podman)
 image:
-	$$(command -v docker || command -v podman) build -t $(IMAGE) .
+	$$(command -v docker || command -v podman) build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
+
+# Publish a release: make release V=v0.2.0 → GitHub builds ghcr.io/…/multiclaude:0.2.0 + :latest
+release:
+	@echo "$(V)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$$' || (echo "usage: make release V=v1.2.3" >&2; exit 1)
+	@test -z "$$(git status --porcelain)" || (echo "commit your changes first" >&2; exit 1)
+	git tag -a $(V) -m "MultiClaude $(V)" && git push origin main $(V)
 
 # Export the image as a tarball to load on the NAS: `docker load -i multiclaude.tar`
 image-tar: image

@@ -68,6 +68,11 @@ func configureRepo(path string) error {
 // (including LFS objects if git-lfs is available); otherwise it seeds an
 // initial commit so that every agent can branch from the default branch.
 func (s *Server) createRepo(slug, name, description, branch, importURL string) error {
+	return s.createRepoWith(slug, name, description, branch, importURL, nil)
+}
+
+// createRepoWith takes extra git options for the import (e.g. an auth header).
+func (s *Server) createRepoWith(slug, name, description, branch, importURL string, gitOpts []string) error {
 	path := s.repoPath(slug)
 	if _, err := os.Stat(path); err == nil {
 		return configureRepo(path)
@@ -78,7 +83,9 @@ func (s *Server) createRepo(slug, name, description, branch, importURL string) e
 	if importURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
-		if out, err := exec.CommandContext(ctx, "git", "clone", "--bare", importURL, path).CombinedOutput(); err != nil {
+		c := exec.CommandContext(ctx, "git", append(append(append([]string{}, gitOpts...), "clone", "--bare"), importURL, path)...)
+		c.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true")
+		if out, err := c.CombinedOutput(); err != nil {
 			os.RemoveAll(path)
 			return fmt.Errorf("import failed: %v: %s", err, out)
 		}
@@ -96,7 +103,7 @@ func (s *Server) createRepo(slug, name, description, branch, importURL string) e
 			}
 		}
 		s.gitStr(slug, "symbolic-ref", "HEAD", "refs/heads/"+branch)
-		go s.importLFS(slug, importURL)
+		go s.importLFS(slug, importURL, gitOpts)
 		return nil
 	}
 	if out, err := exec.Command("git", "init", "--bare", "-b", branch, path).CombinedOutput(); err != nil {
@@ -129,7 +136,7 @@ func (s *Server) createRepo(slug, name, description, branch, importURL string) e
 	return err
 }
 
-func (s *Server) importLFS(slug, url string) {
+func (s *Server) importLFS(slug, url string, gitOpts []string) {
 	if _, err := exec.LookPath("git-lfs"); err != nil {
 		return
 	}
@@ -138,7 +145,8 @@ func (s *Server) importLFS(slug, url string) {
 		return
 	}
 	defer os.RemoveAll(tmp)
-	cmd := exec.Command("git", "clone", url, tmp)
+	cmd := exec.Command("git", append(append(append([]string{}, gitOpts...), "clone"), url, tmp)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		s.logf("lfs import clone: %v %s", err, out)
 		return
@@ -150,7 +158,7 @@ func (s *Server) importLFS(slug, url string) {
 			s.logf("lfs import %v: %v %s", args, err, out)
 		}
 	}
-	run("lfs", "fetch", "--all", "origin")
+	run(append(append([]string{}, gitOpts...), "lfs", "fetch", "--all", "origin")...)
 	run("remote", "add", "mc", fmt.Sprintf("http://127.0.0.1%s/git/%s.git", s.listenPort(), slug))
 	run("-c", "http.extraHeader=Authorization: Bearer "+s.internalToken, "lfs", "push", "--all", "mc")
 }
@@ -166,7 +174,7 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	}
 	slug := rest[:idx]
 	sub := rest[idx+4:]
-	if !slugRe.MatchString(slug) {
+	if !validRepoKey(slug) {
 		http.NotFound(w, r)
 		return
 	}
@@ -208,38 +216,67 @@ func mustLookPath(name string) string {
 
 var errConflict = errors.New("merge conflict")
 
-// mergeBranch merges branch into base inside the bare repo without a worktree.
-func (s *Server) mergeBranch(slug, base, branch, message string) (string, error) {
+var errNoBranch = errors.New("branch does not exist")
+
+// mergePlan is a computed (not yet applied) merge of branch into base.
+type mergePlan struct {
+	key, base       string
+	baseSHA, newSHA string
+	noop            bool // branch already contained in base
+}
+
+// planMerge computes the merge commit without touching any ref, so several
+// repos can be checked before any of them is changed.
+func (s *Server) planMerge(slug, base, branch, message string) (*mergePlan, error) {
 	baseSHA, err := s.gitStr(slug, "rev-parse", "--verify", "refs/heads/"+base)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("base branch %s missing: %v", base, err)
 	}
 	headSHA, err := s.gitStr(slug, "rev-parse", "--verify", "refs/heads/"+branch)
 	if err != nil {
+		return nil, errNoBranch
+	}
+	pl := &mergePlan{key: slug, base: base, baseSHA: baseSHA}
+	if _, err := s.gitStr(slug, "merge-base", "--is-ancestor", headSHA, baseSHA); err == nil {
+		pl.noop, pl.newSHA = true, baseSHA // already merged / no commits
+		return pl, nil
+	}
+	if _, err := s.gitStr(slug, "merge-base", "--is-ancestor", baseSHA, headSHA); err == nil {
+		pl.newSHA = headSHA // fast-forward
+		return pl, nil
+	}
+	out, err := s.git(slug, nil, "merge-tree", "--write-tree", "--no-messages", baseSHA, headSHA)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", errConflict, strings.TrimSpace(string(out)))
+	}
+	tree := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	if pl.newSHA, err = s.gitStr(slug, "commit-tree", tree, "-p", baseSHA, "-p", headSHA, "-m", message); err != nil {
+		return nil, err
+	}
+	return pl, nil
+}
+
+func (s *Server) applyMerge(pl *mergePlan) error {
+	if pl.noop {
+		return nil
+	}
+	if _, err := s.gitStr(pl.key, "update-ref", "refs/heads/"+pl.base, pl.newSHA, pl.baseSHA); err != nil {
+		return err
+	}
+	s.onPush(pl.key)
+	return nil
+}
+
+// mergeBranch merges branch into base inside the bare repo without a worktree.
+func (s *Server) mergeBranch(slug, base, branch, message string) (string, error) {
+	pl, err := s.planMerge(slug, base, branch, message)
+	if errors.Is(err, errNoBranch) {
 		return "", fmt.Errorf("branch %s does not exist on the server (was it pushed?)", branch)
 	}
-	if _, err := s.gitStr(slug, "merge-base", "--is-ancestor", headSHA, baseSHA); err == nil {
-		return baseSHA, nil // already merged
-	}
-	var newSHA string
-	if _, err := s.gitStr(slug, "merge-base", "--is-ancestor", baseSHA, headSHA); err == nil {
-		newSHA = headSHA // fast-forward
-	} else {
-		out, err := s.git(slug, nil, "merge-tree", "--write-tree", "--no-messages", baseSHA, headSHA)
-		if err != nil {
-			return "", fmt.Errorf("%w: %s", errConflict, strings.TrimSpace(string(out)))
-		}
-		tree := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
-		newSHA, err = s.gitStr(slug, "commit-tree", tree, "-p", baseSHA, "-p", headSHA, "-m", message)
-		if err != nil {
-			return "", err
-		}
-	}
-	if _, err := s.gitStr(slug, "update-ref", "refs/heads/"+base, newSHA, baseSHA); err != nil {
+	if err != nil {
 		return "", err
 	}
-	s.onPush(slug)
-	return newSHA, nil
+	return pl.newSHA, s.applyMerge(pl)
 }
 
 // ---- browsing -----------------------------------------------------------

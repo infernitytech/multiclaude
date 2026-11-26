@@ -4,10 +4,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+ARG VERSION=dev
 ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags="-s -w" -o /out/multiclaude-server ./cmd/multiclaude-server
+RUN go build -trimpath -ldflags="-s -w -X multiclaude/internal/proto.Version=${VERSION}" -o /out/multiclaude-server ./cmd/multiclaude-server
 RUN set -e; for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
-      GOOS=${t%/*} GOARCH=${t#*/} go build -trimpath -ldflags="-s -w" \
+      GOOS=${t%/*} GOARCH=${t#*/} go build -trimpath -ldflags="-s -w -X multiclaude/internal/proto.Version=${VERSION}" \
         -o /out/dl/multiclaude-runner-${t%/*}-${t#*/} ./cmd/multiclaude-runner; \
     done
 

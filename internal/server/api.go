@@ -74,7 +74,7 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 	nodes, _ := s.listNodes()
 	var cost float64
 	s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM runs`).Scan(&cost)
-	writeJSON(w, map[string]any{"version": proto.Version, "projects": nz2(s.allProjects()), "nodes": nzn(nodes), "total_cost_usd": cost})
+	writeJSON(w, map[string]any{"version": proto.Version, "latest_version": latestRelease(), "projects": nz2(s.allProjects()), "nodes": nzn(nodes), "total_cost_usd": cost})
 }
 
 func nz2(p []*Project) []*Project {
@@ -107,6 +107,7 @@ func (s *Server) apiCreateProject(w http.ResponseWriter, r *http.Request) {
 		Slug          string   `json:"slug"`
 		Description   string   `json:"description"`
 		ImportURL     string   `json:"import_url"`
+		ImportToken   string   `json:"import_token"`
 		ReviewMode    string   `json:"review_mode"`
 		DefaultBranch string   `json:"default_branch"`
 		Instructions  string   `json:"instructions"`
@@ -137,7 +138,7 @@ func (s *Server) apiCreateProject(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "a project with this slug already exists")
 		return
 	}
-	if err := s.createRepo(in.Slug, in.Name, in.Description, in.DefaultBranch, strings.TrimSpace(in.ImportURL)); err != nil {
+	if err := s.createRepoAuth(in.Slug, in.Name, in.Description, in.DefaultBranch, strings.TrimSpace(in.ImportURL), firstNonEmpty(in.ImportToken, s.setting("github_token"))); err != nil {
 		httpErr(w, 500, err.Error())
 		return
 	}
@@ -148,6 +149,7 @@ func (s *Server) apiCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := res.LastInsertId()
+	s.ensurePrimaryRepos()
 	for _, n := range in.Nodes {
 		s.db.Exec(`INSERT OR IGNORE INTO node_projects(node_id,project_id) VALUES(?,?)`, n, id)
 	}
@@ -241,7 +243,9 @@ func (s *Server) apiDeleteProject(w http.ResponseWriter, r *http.Request) {
 		`DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE project_id=?)`,
 		`DELETE FROM runs WHERE project_id=?`, `DELETE FROM issues WHERE project_id=?`,
 		`DELETE FROM messages WHERE project_id=?`, `DELETE FROM node_projects WHERE project_id=?`,
-		`DELETE FROM chat_sessions WHERE project_id=?`, `DELETE FROM projects WHERE id=?`,
+		`DELETE FROM chat_sessions WHERE project_id=?`,
+		`DELETE FROM mirrors WHERE repo_id IN (SELECT id FROM repos WHERE project_id=?)`, `DELETE FROM repos WHERE project_id=?`,
+		`DELETE FROM projects WHERE id=?`,
 	} {
 		s.db.Exec(q, p.ID)
 	}
@@ -250,6 +254,12 @@ func (s *Server) apiDeleteProject(w http.ResponseWriter, r *http.Request) {
 	os.MkdirAll(trash, 0o755)
 	os.Rename(s.repoPath(p.Slug), filepath.Join(trash, "repo.git"))
 	os.Rename(filepath.Join(s.DataDir, "lfs", p.Slug), filepath.Join(trash, "lfs"))
+	os.Rename(filepath.Join(s.DataDir, "repos", p.Slug), filepath.Join(trash, "repos")) // further repos
+	if more, _ := filepath.Glob(filepath.Join(s.DataDir, "lfs", p.Slug+"~*")); len(more) > 0 {
+		for _, d := range more {
+			os.Rename(d, filepath.Join(trash, "lfs-"+filepath.Base(d)))
+		}
+	}
 	s.emit(event{Type: "projects"})
 	w.WriteHeader(204)
 }
@@ -696,23 +706,20 @@ func (s *Server) apiUnassignNode(w http.ResponseWriter, r *http.Request) {
 
 // ---- repo browsing ---------------------------------------------------------------
 
-func refParam(r *http.Request, p *Project) string {
+func refParam(r *http.Request, rp *Repo) string {
 	ref := r.URL.Query().Get("ref")
-	if ref == "" {
-		ref = p.DefaultBranch
-	}
-	if strings.HasPrefix(ref, "-") {
-		ref = p.DefaultBranch
+	if ref == "" || strings.HasPrefix(ref, "-") {
+		ref = rp.DefaultBranch
 	}
 	return ref
 }
 
 func (s *Server) apiBranches(w http.ResponseWriter, r *http.Request) {
-	p := s.projectFromReq(w, r)
-	if p == nil {
+	_, rp := s.repoFromReq(w, r)
+	if rp == nil {
 		return
 	}
-	b, err := s.branches(p.Slug, p.DefaultBranch)
+	b, err := s.branches(rp.Key, rp.DefaultBranch)
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
@@ -724,11 +731,11 @@ func (s *Server) apiBranches(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiTree(w http.ResponseWriter, r *http.Request) {
-	p := s.projectFromReq(w, r)
-	if p == nil {
+	_, rp := s.repoFromReq(w, r)
+	if rp == nil {
 		return
 	}
-	entries, err := s.lsTree(p.Slug, refParam(r, p), r.URL.Query().Get("path"))
+	entries, err := s.lsTree(rp.Key, refParam(r, rp), r.URL.Query().Get("path"))
 	if err != nil {
 		httpErr(w, 404, err.Error())
 		return
@@ -740,13 +747,13 @@ func (s *Server) apiTree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiBlob(w http.ResponseWriter, r *http.Request) {
-	p := s.projectFromReq(w, r)
-	if p == nil {
+	_, rp := s.repoFromReq(w, r)
+	if rp == nil {
 		return
 	}
 	path := strings.Trim(r.URL.Query().Get("path"), "/")
-	spec := refParam(r, p) + ":" + path
-	data, err := s.git(p.Slug, nil, "cat-file", "blob", spec)
+	spec := refParam(r, rp) + ":" + path
+	data, err := s.git(rp.Key, nil, "cat-file", "blob", spec)
 	if err != nil {
 		httpErr(w, 404, err.Error())
 		return
@@ -768,7 +775,7 @@ func (s *Server) apiBlob(w http.ResponseWriter, r *http.Request) {
 				size, _ = strconv.ParseInt(strings.TrimPrefix(l, "size "), 10, 64)
 			}
 		}
-		out["lfs"] = map[string]any{"oid": oid, "size": size, "href": "/git/" + p.Slug + ".git/info/lfs/objects/" + oid}
+		out["lfs"] = map[string]any{"oid": oid, "size": size, "href": "/git/" + rp.Key + ".git/info/lfs/objects/" + oid}
 	} else if bytes.IndexByte(data[:min(len(data), 8000)], 0) >= 0 {
 		out["binary"] = true
 	} else {
@@ -782,15 +789,15 @@ func (s *Server) apiBlob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiLog(w http.ResponseWriter, r *http.Request) {
-	p := s.projectFromReq(w, r)
-	if p == nil {
+	_, rp := s.repoFromReq(w, r)
+	if rp == nil {
 		return
 	}
 	ref := r.URL.Query().Get("ref")
 	if strings.HasPrefix(ref, "-") {
 		ref = ""
 	}
-	l, err := s.gitLog(p.Slug, ref, 100)
+	l, err := s.gitLog(rp.Key, ref, 100)
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
@@ -804,8 +811,8 @@ func (s *Server) apiLog(w http.ResponseWriter, r *http.Request) {
 var shaRe = regexp.MustCompile(`^[0-9a-f]{4,64}$`)
 
 func (s *Server) apiCommit(w http.ResponseWriter, r *http.Request) {
-	p := s.projectFromReq(w, r)
-	if p == nil {
+	_, rp := s.repoFromReq(w, r)
+	if rp == nil {
 		return
 	}
 	sha := r.URL.Query().Get("sha")
@@ -813,7 +820,7 @@ func (s *Server) apiCommit(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad sha")
 		return
 	}
-	out, err := s.git(p.Slug, nil, "show", "--stat", "--patch", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n%B", sha)
+	out, err := s.git(rp.Key, nil, "show", "--stat", "--patch", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n%B", sha)
 	if err != nil {
 		httpErr(w, 404, err.Error())
 		return

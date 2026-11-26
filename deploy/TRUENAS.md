@@ -51,31 +51,15 @@ Include it in your snapshot/replication tasks.
 
 ## 4. The image
 
-The NAS can't build the image itself. Build it on your workstation and pull it from the NAS.
+The image is published on GitHub's registry: `ghcr.io/infernitytech/multiclaude`. The compose file pulls it directly, so there is nothing to build or copy.
 
-**Without SSH** (easiest). On your workstation, in the repo:
+| Tag | What it is |
+|---|---|
+| `latest` | newest release (recommended) |
+| `0.2.0`, `0.2` | a specific release / release line, for pinning |
+| `latest-main` | every commit on `main`, untested bleeding edge |
 
-```sh
-make serve-image
-```
-
-This builds the image, serves it on port 8000 and prints a command like:
-
-```sh
-curl -fL http://192.168.1.20:8000/multiclaude.tar -o /tmp/multiclaude.tar && sudo docker load -i /tmp/multiclaude.tar && rm /tmp/multiclaude.tar
-```
-
-Paste that into TrueNAS → *System → Shell*. When it says `Loaded image: …multiclaude:latest`, stop `make serve-image` with Ctrl+C. Only the tar file is served, nothing else from your computer.
-
-**With SSH**: enable *System → Services → SSH*. On TrueNAS 24.10+ root can't log in over SSH; use the admin user (`truenas_admin`), and add your public key under *Credentials → Users → Edit → Authorized Keys*. Then:
-
-```sh
-make deploy-nas NAS=truenas_admin@<nas-ip>
-```
-
-Use the IP if `truenas.local` doesn't resolve. `sudo` must work without a password for `docker`: in the user's settings, add `/usr/bin/docker` to *Allowed sudo commands with no password*.
-
-**Updates**: load a new image the same way, then *Apps → multiclaude → Restart*. The database migrates itself on start.
+**Building it yourself** (offline, or with local changes): on your workstation run `make serve-image`. It builds the image, serves it on port 8000 and prints a command to paste into TrueNAS → *System → Shell* that downloads, loads and tags it as `multiclaude:latest`. Then use `image: multiclaude:latest` and `pull_policy: never` in the compose file. With SSH on the NAS, `make deploy-nas NAS=truenas_admin@<nas-ip>` does the same in one step.
 
 ## 5. Install the app
 
@@ -129,12 +113,29 @@ LAN machines can keep using `http://<nas-ip>:8090`. If a LAN machine should use 
 
 Already-running machines from before auth existed must be enrolled once. Re-run the installer with `--token`; they keep their identity and project assignments.
 
-## 7. People and git
+## 7. Updating
+
+The UI shows "⬆ vX.Y.Z available" in the sidebar when a newer release exists.
+
+1. Optional but cheap: take a snapshot of the dataset (*Datasets → tank/apps/multiclaude → Create Snapshot*). That's your rollback for the data.
+2. *Apps → multiclaude → ⋮ → Pull Image*, or *Edit → Save* without changes. With `pull_policy: always` the new image is pulled and the container recreated. Running agents are interrupted; their issues go back to the queue and are picked up again.
+3. The database migrates itself on start. Check *Logs* for `MultiClaude server vX.Y.Z`.
+
+**Runners update themselves.** Every runner compares its version with the server's. When they differ and it's idle, it downloads the matching binary from the server, checks it, replaces itself and restarts. Nothing to do on the machines. To opt out on a machine, set `MC_NO_SELF_UPDATE=1` in its service environment.
+
+**Rollback**: change the tag to the previous version (e.g. `:0.1.0`), save, and roll back the dataset snapshot if the newer version already migrated the database.
+
+**Pinning**: with a fixed tag like `:0.2.0` nothing changes until you edit the tag. That's the safest choice if agents work unattended.
+
+If you use a self-built image, run `make serve-image` again, paste the command, then *Edit → Save* the app.
+
+## 8. People and git
 
 - **Users & account**: add users (everyone has full access), change passwords.
 - Git uses the same accounts:
   ```sh
-  git clone https://multiclaude.example.com:8943/git/<project>.git   # asks for username + password
+  git clone https://multiclaude.example.com:8943/git/<project>.git          # primary repository
+  git clone https://multiclaude.example.com:8943/git/<project>/<repo>.git   # further repositories
   git config --global credential.helper store                   # or your OS keychain helper
   ```
 - Scripts can call the API with Basic auth: `curl -u admin:… https://…/api/overview`.

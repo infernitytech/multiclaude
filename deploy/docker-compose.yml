@@ -3,12 +3,14 @@
 #
 # Before installing:
 #  1. Create a dataset, e.g. /mnt/tank/apps/multiclaude, owned by user "apps" (568).
-#  2. Load the image onto the NAS (`make serve-image`, see the guide).
-#  3. Edit the host path and the MC_* values below.
+#  2. Edit the host path and the MC_* values below.
+# Updating: Apps → multiclaude → ⋮ → "Pull Image" (or Edit → Save), see the guide.
 services:
   multiclaude:
-    image: multiclaude:latest            # loaded with `docker load`; or ghcr.io/<you>/multiclaude:latest
-    pull_policy: never                   # remove this line when using a registry image
+    # Releases: :latest follows the newest release; pin e.g. :0.2.0 to update only when you change it.
+    # Self-built image loaded with `make serve-image`: use multiclaude:latest + pull_policy: never.
+    image: ghcr.io/infernitytech/multiclaude:latest
+    pull_policy: always
     container_name: multiclaude
     restart: unless-stopped
     user: "568:568"

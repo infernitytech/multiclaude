@@ -130,7 +130,7 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	// A single connection serialises writes and makes claim transactions trivially atomic.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema + authSchema); err != nil {
+	if _, err := db.Exec(schema + authSchema + repoSchema); err != nil {
 		return nil, err
 	}
 	// Additive migrations for databases created by older versions.

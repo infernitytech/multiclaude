@@ -84,15 +84,20 @@ func New(dataDir, addr, downloadDir string) (*Server, error) {
 
 		internalToken: randToken("mci_"),
 	}
+	s.ensurePrimaryRepos()
 	// Re-apply repo config for existing repos (e.g. after upgrades).
-	rows, err := db.Query(`SELECT slug FROM projects`)
+	rows, err := db.Query(`SELECT CASE WHEN r.is_primary=1 THEN p.slug ELSE p.slug || '/' || r.name END FROM repos r JOIN projects p ON p.id=r.project_id`)
 	if err == nil {
+		var keys []string
 		for rows.Next() {
-			var slug string
-			rows.Scan(&slug)
-			configureRepo(s.repoPath(slug))
+			var k string
+			rows.Scan(&k)
+			keys = append(keys, k)
 		}
 		rows.Close()
+		for _, k := range keys {
+			configureRepo(s.repoPath(k))
+		}
 	}
 	return s, nil
 }
@@ -118,6 +123,8 @@ func (s *Server) Run() error {
 	s.ensureAdmin()
 	s.joinToken()
 	go s.reaper()
+	go s.mirrorLoop()
+	go s.updateCheckLoop()
 	mux := http.NewServeMux()
 	s.routes(mux)
 	handler := logMiddleware(s.authMiddleware(mux))
@@ -223,6 +230,16 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/projects/{slug}/messages", s.apiMessages)
 	m.HandleFunc("POST /api/projects/{slug}/messages", s.apiPostMessage)
 	m.HandleFunc("GET /api/projects/{slug}/runs", s.apiProjectRuns)
+	m.HandleFunc("GET /api/projects/{slug}/repos", s.apiRepos)
+	m.HandleFunc("POST /api/projects/{slug}/repos", s.apiCreateRepo)
+	m.HandleFunc("PATCH /api/projects/{slug}/repos/{repo}", s.apiUpdateRepo)
+	m.HandleFunc("DELETE /api/projects/{slug}/repos/{repo}", s.apiDeleteRepo)
+	m.HandleFunc("POST /api/projects/{slug}/repos/{repo}/mirrors", s.apiCreateMirror)
+	m.HandleFunc("PATCH /api/projects/{slug}/repos/{repo}/mirrors/{mid}", s.apiUpdateMirror)
+	m.HandleFunc("DELETE /api/projects/{slug}/repos/{repo}/mirrors/{mid}", s.apiDeleteMirror)
+	m.HandleFunc("POST /api/projects/{slug}/repos/{repo}/mirrors/{mid}/sync", s.apiSyncMirror)
+	m.HandleFunc("GET /api/settings/github", s.apiGitHubSettings)
+	m.HandleFunc("PUT /api/settings/github", s.apiGitHubSettings)
 	m.HandleFunc("GET /api/projects/{slug}/repo/branches", s.apiBranches)
 	m.HandleFunc("GET /api/projects/{slug}/repo/tree", s.apiTree)
 	m.HandleFunc("GET /api/projects/{slug}/repo/blob", s.apiBlob)
@@ -376,10 +393,12 @@ func (s *Server) workAvailable() {
 	s.mu.Unlock()
 }
 
-func (s *Server) onPush(slug string) {
+// onPush runs after anything changed refs in a repo (git push or a server merge).
+func (s *Server) onPush(key string) {
 	var id int64
-	s.db.QueryRow(`SELECT id FROM projects WHERE slug=?`, slug).Scan(&id)
+	s.db.QueryRow(`SELECT id FROM projects WHERE slug=?`, strings.SplitN(key, "/", 2)[0]).Scan(&id)
 	s.emit(event{Type: "repo", ProjectID: id})
+	s.mirrorsChanged(key)
 }
 
 // reaper releases work held by nodes that disappeared.

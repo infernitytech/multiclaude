@@ -50,6 +50,8 @@ type Runner struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	wsInUse  map[string]bool
+
+	updateTried map[string]bool // server versions a self-update was attempted for
 }
 
 func defaultWorkDir(dir string) string {
@@ -99,7 +101,7 @@ func New(cfg Config) (*Runner, error) {
 		return nil, err
 	}
 	r := &Runner{cfg: cfg, self: self, http: &http.Client{Timeout: 60 * time.Second},
-		sessions: map[string]*session{}, wsInUse: map[string]bool{}}
+		sessions: map[string]*session{}, wsInUse: map[string]bool{}, updateTried: map[string]bool{}}
 	if b, err := os.ReadFile(filepath.Join(cfg.WorkDir, "node-id")); err == nil {
 		r.nodeID = strings.TrimSpace(string(b)) // pre-auth versions
 	}
@@ -201,6 +203,7 @@ func (r *Runner) register() error {
 		return err
 	}
 	r.nodeID = resp.NodeID
+	defer r.maybeSelfUpdate(resp.ServerVersion)
 	if resp.NodeToken != "" {
 		r.token = resp.NodeToken
 		if err := r.saveCredentials(); err != nil {
@@ -268,6 +271,9 @@ func (r *Runner) pollLoop(ctx context.Context) error {
 		fails = 0
 		for _, c := range resp.Commands {
 			r.handle(c)
+		}
+		if len(resp.Commands) == 0 {
+			r.maybeSelfUpdate(resp.ServerVersion)
 		}
 	}
 	return nil

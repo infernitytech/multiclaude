@@ -1,15 +1,27 @@
-# Publishes ghcr.io/<owner>/multiclaude:latest on every push to main,
-# so TrueNAS can pull it directly.
+# Tests, then publishes ghcr.io/<owner>/multiclaude:
+#   push to main  → :latest-main (bleeding edge)
+#   tag vX.Y.Z    → :X.Y.Z, :X.Y and :latest, plus a GitHub release
+# TrueNAS pulls :latest (or a pinned :X.Y.Z).
 name: image
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
   packages: write
 jobs:
-  build:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./... && go test ./...
+  image:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,11 +37,29 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/multiclaude
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest-main,enable={{is_default_branch}}
+      - id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "v=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "v=main-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: VERSION=${{ steps.ver.outputs.v }}
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag

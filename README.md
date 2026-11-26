@@ -2,7 +2,7 @@
 
 A self-hosted coordination server for a swarm of **Claude Code** machines working on the same projects.
 
-- **Git hosting** over smart HTTP, with a built-in **Git LFS** server.
+- **Git hosting** over smart HTTP, with a built-in **Git LFS** server. A project can span **several repositories**, and each can be **mirrored to GitHub** (public or private), updated automatically after every merge.
 - **Safe to expose to the internet**: HTTPS with automatic Let's Encrypt certificates, username/password logins (also for git), and per-machine tokens for runners that are enrolled with a single command.
 - A **project board** per repository: backlog / to do / in progress / review / blocked / done, with priorities, labels, required capabilities and dependencies. It has quick-add and drag & drop.
 - **Machines** run a small daemon (`multiclaude-runner`). The runner detects the local Claude Code installation (logged into that machine's own subscription) and its hardware: CPU, RAM, GPUs and installed toolchains. It then claims and works on issues automatically.
@@ -28,14 +28,11 @@ A self-hosted coordination server for a swarm of **Claude Code** machines workin
 
 The server is a single container. It needs one persistent volume, mounted at `/data`. That volume holds the repositories, LFS objects and the SQLite database.
 
-**Get the image onto the NAS** (pick one):
+**The image** is `ghcr.io/infernitytech/multiclaude` (`:latest` = newest release, `:X.Y.Z` pinned, `:latest-main` = every commit). To build your own instead, `make serve-image` serves it from your workstation and prints a command to paste into the TrueNAS web shell.
 
-- *Registry*: push this repo to GitHub. The included workflow (`.github/workflows/image.yml`) publishes `ghcr.io/<you>/multiclaude:latest`.
-- *Manual*: `make image-tar` on your workstation, copy `multiclaude.tar` to the NAS, then run `sudo docker load -i multiclaude.tar`.
+**Install**: create a dataset, e.g. `/mnt/tank/apps/multiclaude`, owned by the `apps` user (568). Then go to *Apps → Discover Apps → ⋮ → Install via YAML* and paste [`deploy/docker-compose.yml`](deploy/docker-compose.yml). Adjust the host path and `MC_DOMAIN` first.
 
-- *From your workstation*: `make serve-image` serves the image and prints a command to paste into the TrueNAS web shell. With SSH enabled on the NAS, use `make deploy-nas NAS=truenas_admin@<nas-ip>` instead.
-
-**Install**: create a dataset, e.g. `/mnt/tank/apps/multiclaude`, owned by the `apps` user (568). Then go to *Apps → Discover Apps → ⋮ → Install via YAML* and paste [`deploy/docker-compose.yml`](deploy/docker-compose.yml). Adjust the image name, host path and `MC_DOMAIN` first.
+**Update**: *Apps → multiclaude → ⋮ → Pull Image*. The database migrates itself, and **runners update themselves** to the server's version when idle. Details and rollback: [deploy/TRUENAS.md](deploy/TRUENAS.md#7-updating).
 
 Open `http://<nas>:8090` (LAN) or `https://<your domain>`. The first start prints a generated `admin` password in the app logs. **[deploy/TRUENAS.md](deploy/TRUENAS.md)** walks through the whole internet-facing setup: domain, port forwarding, certificates, users, machines.
 
@@ -51,6 +48,7 @@ Open `http://<nas>:8090` (LAN) or `https://<your domain>`. The first start print
 | `--acme-email` / `MC_ACME_EMAIL` | – | Contact address for Let's Encrypt |
 | `MC_ADMIN_USER`, `MC_ADMIN_PASSWORD` | `admin`, random | First account, created only when there are no users |
 | `--data` / `MC_DATA` | `./data` | Repositories, LFS objects, database, certificates |
+| `MC_UPDATE_REPO` | `infernitytech/multiclaude` | GitHub repo checked for new releases (`off` disables) |
 
 `multiclaude-server reset-password [user]` sets a new random password.
 
@@ -102,7 +100,7 @@ Auto-detected capabilities include:
 
 ## 3. Work with it
 
-1. **Create a project.** It gets a git repository at `https://<server>/git/<slug>.git` (log in with your username and password), optionally imported from an existing URL.
+1. **Create a project.** It gets a primary git repository at `https://<server>/git/<slug>.git` (log in with your username and password), optionally imported from an existing URL.
 2. **Add issues.** Use the quick-add box (`n` focuses it). Syntax: `Train the model !high +gpu #ml`, where `!urgent|!high|!medium|!low` sets the priority, `+cap` adds a required capability, and `#label` adds a label. Open an issue to edit its description, dependencies, etc.
 3. **Machines claim issues** from *To do*, by priority and board order:
    - Each issue is worked on in branch `issue-N`, then moves to *Review*.
@@ -115,6 +113,24 @@ Auto-detected capabilities include:
    - `human`: you click **Approve & merge** in the issue.
    - `none`: work is merged as soon as the worker is done.
 6. **Project instructions** (Settings) are appended to every agent's system prompt. Put build/test commands and conventions there.
+7. **Repositories & mirrors** (Settings) — see below.
+
+### Several repositories
+
+A project starts with one repository, `/git/<slug>.git`. Add more under *Settings → Repositories & mirrors* (empty or imported from a URL); each is served at `/git/<slug>/<name>.git` with LFS, and the *Code* tab has a repository picker.
+
+- Agents get **all repositories checked out side by side** (`<workspace>/<repo>/`), with each repository's description and default branch in their prompt.
+- An issue uses branch `issue-N` in every repository it changes. On approval the server merges **all of them together, or none**: if one conflicts, nothing is merged and the issue goes back with instructions.
+- Runners older than this feature only check out the primary repository; they update themselves automatically once the server runs a release.
+
+### GitHub mirrors
+
+Each repository can have mirrors: one-way copies the server pushes to after every push and merge (and retries every 10 minutes). Agents are told about them and never push to them directly.
+
+- **Target**: `owner/name` (GitHub) or any `https://…git` URL. MultiClaude can create the GitHub repository for you, private or public.
+- **Credentials**: a server-wide GitHub token (*Users & account → GitHub*) or a token per mirror. Fine-grained tokens need *Contents: read & write*, plus *Administration: read & write* to create repositories.
+- **Mode**: *default branch + tags* (fast-forward only, safe for repos others also use), or *all branches & tags* (forced, prunes what was deleted here).
+- **Visibility** is detected; for **public** mirrors agents are warned that everything they commit becomes public.
 
 Moving an issue out of *In progress*/*Review* on the board cancels the agent working on it.
 
@@ -145,6 +161,7 @@ curl -u admin:PASSWORD -XPOST https://<server>/api/projects/my-game/issues -d '{
 
 ## Limits & notes
 
+- Releases: `make release V=v0.2.0` tags and pushes; GitHub Actions tests, builds the multi-arch image and creates the release.
 - All accounts have full access (no roles). Agents can use their machine's token, so only enroll machines you trust.
 - Runners support Linux and macOS. On Windows, use WSL.
 - The cost shown is Claude Code's API-equivalent estimate. On subscriptions it's informational only.

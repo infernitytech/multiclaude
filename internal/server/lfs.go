@@ -21,7 +21,8 @@ var oidRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 const lfsMime = "application/vnd.git-lfs+json"
 
 func (s *Server) lfsPath(slug, oid string) string {
-	return filepath.Join(s.DataDir, "lfs", slug, oid[0:2], oid[2:4], oid)
+	// "project/repo" → lfs/project~repo (keeps it apart from the primary's aa/bb dirs)
+	return filepath.Join(s.DataDir, "lfs", strings.ReplaceAll(slug, "/", "~"), oid[0:2], oid[2:4], oid)
 }
 
 func lfsJSON(w http.ResponseWriter, code int, v any) {
