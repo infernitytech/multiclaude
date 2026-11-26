@@ -131,6 +131,9 @@ type Assignment struct {
 	Repos []RepoSpec `json:"repos,omitempty"`
 	// Env is added to the agent's environment (e.g. CUDA_VISIBLE_DEVICES for its GPUs).
 	Env map[string]string `json:"env,omitempty"`
+	// WorkspaceRoot is where the runner keeps project checkouts on this machine
+	// ("~" and $VARS are expanded there). Empty = the runner's own default.
+	WorkspaceRoot string `json:"workspace_root,omitempty"`
 }
 
 // RepoSpec is one repository in the agent's workspace.

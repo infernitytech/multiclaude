@@ -55,15 +55,32 @@ func (s *Server) runnerLoad(w http.ResponseWriter, r *http.Request) {
 }
 
 // Draining runners: they wait for their sessions to end before updating.
-var draining = map[string]string{} // node id → version (guarded by loadMu)
+var (
+	draining   = map[string]string{}    // node id → version (guarded by loadMu)
+	drainStart = map[string]time.Time{} // node id → start of the current drain window
+)
+
+// A drain only holds back new work for a while: a machine with long sessions
+// would otherwise leave its free slots idle for hours after every server
+// update. After drainHold it gets work again (it updates whenever it happens to
+// be idle) and after drainPause the next drain window starts. Applies to old
+// runners too, which accept assignments while they wait to update.
+const (
+	drainHold  = 15 * time.Minute
+	drainPause = 2 * time.Hour
+)
 
 func setDraining(nodeID, version string) {
 	loadMu.Lock()
 	defer loadMu.Unlock()
 	if version == "" {
 		delete(draining, nodeID)
+		delete(drainStart, nodeID)
 	} else {
 		draining[nodeID] = version
+		if _, ok := drainStart[nodeID]; !ok {
+			drainStart[nodeID] = time.Now()
+		}
 	}
 }
 
@@ -71,4 +88,20 @@ func drainingTo(nodeID string) string {
 	loadMu.Lock()
 	defer loadMu.Unlock()
 	return draining[nodeID]
+}
+
+// drainHoldsWork: the machine is draining for an update and should get no new work right now.
+func drainHoldsWork(nodeID string) bool {
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	if draining[nodeID] == "" {
+		return false
+	}
+	t := drainStart[nodeID]
+	if since := time.Since(t); since > drainHold+drainPause {
+		drainStart[nodeID] = time.Now() // next window
+		return true
+	} else {
+		return since < drainHold
+	}
 }

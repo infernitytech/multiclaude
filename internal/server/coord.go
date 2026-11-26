@@ -235,8 +235,9 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cmds := s.drain(n.ID)
-		if n, err = s.node(req.NodeID); err == nil {
-			if free := n.MaxConc - s.runningCount(n.ID); free > 0 && !n.Paused && req.Draining == "" {
+		if fresh, err := s.node(req.NodeID); err == nil { // (a failed lookup must not nil n, used below)
+			n = fresh
+			if free := n.MaxConc - s.runningCount(n.ID); free > 0 && !n.Paused && !drainHoldsWork(n.ID) {
 				cmds = append(cmds, s.claimWork(n, free)...)
 			}
 		}
@@ -586,7 +587,7 @@ func (s *Server) deliverChat(p *Project, targets []*Node, author, body string) s
 				s.enqueue(n.ID, proto.Command{Type: "message", RunID: id, Message: msg})
 			}
 			notes = append(notes, fmt.Sprintf("%s: injected into %d running session(s)", n.Name, len(runs)))
-		} else if s.runningCount(n.ID) < n.MaxConc && drainingTo(n.ID) == "" {
+		} else if s.runningCount(n.ID) < n.MaxConc && !drainHoldsWork(n.ID) {
 			s.startChatRun(p, n, author, body)
 			notes = append(notes, n.Name+": started a chat session")
 		} else {

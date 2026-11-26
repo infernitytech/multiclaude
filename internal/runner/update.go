@@ -22,7 +22,7 @@ import (
 func (r *Runner) maybeSelfUpdate(serverVersion string) {
 	if serverVersion == "" || serverVersion == proto.Version || serverVersion == "dev" || proto.Version == "dev" ||
 		os.Getenv("MC_NO_SELF_UPDATE") != "" {
-		r.pendingUpdate = ""
+		r.pendingUpdate, r.drainSince, r.drainPaused = "", time.Time{}, time.Time{}
 		return
 	}
 	if t, ok := r.updateTried[serverVersion]; ok && time.Since(t) < 15*time.Minute {
@@ -32,12 +32,28 @@ func (r *Runner) maybeSelfUpdate(serverVersion string) {
 	busy := len(r.sessions) + len(r.finishing)
 	r.mu.Unlock()
 	if busy > 0 {
+		// Drain for a bounded time only: long sessions would otherwise keep all
+		// free slots of this machine idle for hours after every server update.
+		if time.Now().Before(r.drainPaused) {
+			r.pendingUpdate = ""
+			return
+		}
+		if r.drainSince.IsZero() {
+			r.drainSince = time.Now()
+		}
+		if time.Since(r.drainSince) > maxDrain {
+			log.Printf("server runs %s (this runner %s): %d session(s) still running after %s of draining; taking work again, updating when idle (next drain in %s)",
+				serverVersion, proto.Version, busy, maxDrain, drainPause)
+			r.drainSince, r.drainPaused, r.pendingUpdate = time.Time{}, time.Now().Add(drainPause), ""
+			return
+		}
 		if r.pendingUpdate != serverVersion {
-			log.Printf("server runs %s (this runner %s): taking no new work, updating once the %d running session(s) are done", serverVersion, proto.Version, busy)
+			log.Printf("server runs %s (this runner %s): taking no new work for up to %s, updating once the %d running session(s) are done", serverVersion, proto.Version, maxDrain, busy)
 		}
 		r.pendingUpdate = serverVersion
 		return
 	}
+	r.drainSince, r.drainPaused = time.Time{}, time.Time{}
 	r.updateTried[serverVersion] = time.Now()
 	r.pendingUpdate = ""
 	if err := r.selfUpdate(serverVersion); err != nil {
@@ -45,12 +61,19 @@ func (r *Runner) maybeSelfUpdate(serverVersion string) {
 	}
 }
 
+// Draining for an update is bounded: after maxDrain the runner takes work again
+// for drainPause (updating as soon as it happens to be idle), then drains again.
+const (
+	maxDrain   = 15 * time.Minute
+	drainPause = 2 * time.Hour
+)
+
 // canSelfUpdate: this runner will update itself to the server's version (so
 // the server should send it no new work until it has). False after a failed
 // attempt, so a runner that cannot update keeps working.
 func (r *Runner) canSelfUpdate() bool {
-	if proto.Version == "dev" || os.Getenv("MC_NO_SELF_UPDATE") != "" {
-		return false
+	if proto.Version == "dev" || os.Getenv("MC_NO_SELF_UPDATE") != "" || time.Now().Before(r.drainPaused) {
+		return false // (while a drain is paused the server must not force one either)
 	}
 	for _, t := range r.updateTried {
 		if time.Since(t) < 15*time.Minute {

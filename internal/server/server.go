@@ -241,6 +241,8 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/projects/{slug}/repos/{repo}/mirrors/{mid}/sync", s.apiSyncMirror)
 	m.HandleFunc("GET /api/settings/github", s.apiGitHubSettings)
 	m.HandleFunc("PUT /api/settings/github", s.apiGitHubSettings)
+	m.HandleFunc("GET /api/settings/runners", s.apiRunnerSettings)
+	m.HandleFunc("PUT /api/settings/runners", s.apiRunnerSettings)
 	m.HandleFunc("GET /api/projects/{slug}/repo/branches", s.apiBranches)
 	m.HandleFunc("GET /api/projects/{slug}/repo/tree", s.apiTree)
 	m.HandleFunc("GET /api/projects/{slug}/repo/blob", s.apiBlob)

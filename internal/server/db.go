@@ -147,6 +147,7 @@ func openDB(path string) (*sql.DB, error) {
 		`ALTER TABLE issues ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE issues ADD COLUMN stopped INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE nodes ADD COLUMN workspace_dir TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return nil, fmt.Errorf("migration %q: %w", m, err)
@@ -222,7 +223,9 @@ type Issue struct {
 	// OpenQuestions counts unanswered ask_human questions (filled for board/detail views).
 	OpenQuestions int `json:"open_questions,omitempty"`
 	// NoMachine: no worker assigned to the project can ever satisfy "requires" (board/list views).
-	NoMachine bool      `json:"no_machine,omitempty"`
+	NoMachine bool `json:"no_machine,omitempty"`
+	// Waiting: why a queued (todo / unassigned review) issue isn't being picked up right now.
+	Waiting   string    `json:"waiting,omitempty"`
 	Attempts  int       `json:"attempts"`
 	Branch    string    `json:"branch"`
 	CreatedBy string    `json:"created_by"`
@@ -264,6 +267,7 @@ type Node struct {
 	DisabledCaps  []string        `json:"disabled_caps"` // switched off in UI (e.g. GPU reserved for something else)
 	OverrideRoles string          `json:"-"`
 	OverrideConc  int             `json:"override_conc"`
+	WorkspaceDir  string          `json:"workspace_dir"` // where this machine keeps project checkouts ("" = the server-wide default)
 	Paused        bool            `json:"paused"`
 	ClaudePath    string          `json:"claude_path"`
 	ClaudeVersion string          `json:"claude_version"`
@@ -305,13 +309,13 @@ func (n *Node) HasRole(r string) bool {
 	return false
 }
 
-const nodeCols = `id,name,hardware,caps,roles,max_conc,extra_caps,disabled_caps,override_roles,override_conc,paused,claude_path,claude_version,claude_auth,claude_account,runner_version,model,last_seen,registered_at`
+const nodeCols = `id,name,hardware,caps,roles,max_conc,extra_caps,disabled_caps,override_roles,override_conc,paused,claude_path,claude_version,claude_auth,claude_account,runner_version,model,last_seen,registered_at,workspace_dir`
 
 func scanNode(r interface{ Scan(...any) error }) (*Node, error) {
 	n := &Node{}
 	var hw, caps, roles, extra, disabled string
 	err := r.Scan(&n.ID, &n.Name, &hw, &caps, &roles, &n.ReportedConc, &extra, &disabled, &n.OverrideRoles, &n.OverrideConc, &n.Paused,
-		&n.ClaudePath, &n.ClaudeVersion, &n.ClaudeAuth, &n.ClaudeAccount, &n.RunnerVersion, &n.Model, &n.LastSeen, &n.RegisteredAt)
+		&n.ClaudePath, &n.ClaudeVersion, &n.ClaudeAuth, &n.ClaudeAccount, &n.RunnerVersion, &n.Model, &n.LastSeen, &n.RegisteredAt, &n.WorkspaceDir)
 	n.Hardware = json.RawMessage(hw)
 	n.Caps, n.ReportedRoles, n.ExtraCaps, n.DisabledCaps = parseStrs(caps), parseStrs(roles), parseStrs(extra), nz(parseStrs(disabled))
 	n.Roles = n.ReportedRoles

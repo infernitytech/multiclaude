@@ -164,7 +164,9 @@ function renderSidebar() {
       S.overview.projects.map(p => {
         const c = p.counts || {};
         const active = (c.in_progress || 0) + (c.review || 0);
-        return link(`/p/${p.slug}`, p.name, h("span", { class: "count" }, active ? `${active} active` : (c.todo || "")));
+        const queued = c.queued ?? c.todo ?? 0;
+        const parts = [active && `${active} active`, queued && `${queued} queued`].filter(Boolean);
+        return link(`/p/${p.slug}`, p.name, h("span", { class: "count", title: "active = in progress or in review · queued = To do and reviews waiting for a reviewer" }, parts.join(" · ")));
       }),
       h("a", { href: "#", onclick: e => { e.preventDefault(); newProjectModal(); } }, "+ New project")),
     h("div", { class: "sidebar-foot" },
@@ -522,7 +524,8 @@ function boardView(info) {
         i.depends_on.length ? h("span", { class: "chip", title: "depends on" }, "⛓ " + i.depends_on.map(d => "#" + d).join(" ")) : null,
         i.assignee && (i.status === "in_progress" || i.status === "review") ? h("span", { style: { marginLeft: "auto" } }, "🤖 " + i.assignee) : null),
       agent && h("div", { class: "card-now", "data-act": agent.id, title: "Live — click to watch", onclick: e => { e.stopPropagation(); go(`/runs/${agent.id}`); } },
-        actText(ACT[agent.id] || agent.activity)));
+        actText(ACT[agent.id] || agent.activity)),
+      !agent && i.waiting && !stuck && h("div", { class: "card-wait", title: "Why no agent is working on this yet" }, "⏳ " + i.waiting));
   }
 
   function column([status, name]) {
@@ -1399,7 +1402,8 @@ function machinesView() {
   const el = h("div", { style: { display: "contents" } },
     h("div", { class: "topbar", style: { paddingBottom: "14px" } }, h("h1", null, "Machines"), h("span", { class: "sub" }, "Computers running Claude Code that work on your projects")), content);
   const editing = new Set();
-  let setup = null;
+  let setup = null, runnerSettings = { workspace_dir: "" };
+  const loadRunnerSettings = () => api("GET", "/api/settings/runners").then(x => { runnerSettings = x; render(true); });
   const loadSetup = (rotate) => api(rotate ? "POST" : "GET", rotate ? "/api/runner-setup/rotate" : "/api/runner-setup").then(x => { setup = x; render(true); });
   function render(force) {
     if (!force && [...content.querySelectorAll("input")].some(i => i === document.activeElement)) return;
@@ -1416,6 +1420,13 @@ function machinesView() {
         h("div", { class: "row", style: { marginTop: "10px", gap: "8px" } },
           h("span", { class: "hint" }, "The join token only enrolls new machines; each machine then gets its own token. Removing a machine revokes it."),
           h("button", { class: "btn small ghost", style: { marginLeft: "auto" }, onclick: () => { if (confirm("Create a new join token? The old install command stops working; enrolled machines keep working.")) loadSetup(true).then(() => toast("New join token created")); } }, "Regenerate join token"))),
+      h("div", { class: "card pad", style: { marginBottom: "18px" } },
+        h("b", null, "Work directory"),
+        h("p", { class: "hint", style: { margin: "4px 0 10px" } }, "Where every machine keeps its project checkouts (one folder per project, one slot per parallel agent). ",
+          h("code", null, "~"), " and ", h("code", null, "$VARS"), " are expanded on each machine. Leave empty for the runner's default (", h("code", null, "~/.multiclaude/workspaces"),
+          "). A machine can override it on its card. Takes effect for new sessions; existing checkouts are not moved (the new location is cloned fresh)."),
+        h("input", { value: runnerSettings.workspace_dir || "", placeholder: "e.g. /data/multiclaude or ~/work/multiclaude", style: { width: "100%", maxWidth: "520px" },
+          onchange: e => api("PUT", "/api/settings/runners", { workspace_dir: e.target.value }).then(x => { runnerSettings = x; toast("Saved — applies to new sessions"); render(true); }) })),
       S.overview.nodes.length ? h("div", { class: "grid", style: { gridTemplateColumns: "repeat(auto-fill,minmax(400px,1fr))" } }, S.overview.nodes.map(machineCard)) :
         h("div", { class: "card empty" }, "No machines yet."),
     ]);
@@ -1432,11 +1443,13 @@ function machinesView() {
     const conc = h("input", { type: "number", min: 1, max: 64, value: n.max_conc, style: { width: "70px" }, onchange: e => save({ max_conc: +e.target.value }) });
     const extra = h("input", { value: n.extra_caps.join(", "), placeholder: "extra tags, e.g. unity, prod-db", onchange: e => save({ extra_caps: e.target.value.split(",").map(x => x.trim()).filter(Boolean) }) });
     const model = h("input", { value: n.model, placeholder: "default (e.g. opus, sonnet)", onchange: e => save({ model: e.target.value }) });
+    const wsDir = h("input", { value: n.workspace_dir || "", placeholder: runnerSettings.workspace_dir ? `default: ${runnerSettings.workspace_dir}` : "default (~/.multiclaude/workspaces)",
+      title: "Where this machine keeps project checkouts — overrides the server-wide work directory. Applies to new sessions.", onchange: e => save({ workspace_dir: e.target.value }) });
     const authOk = /subscription|keychain|env/.test(n.claude_auth || "");
     return h("div", { class: "card pad machine" },
       h("div", { class: "hdr" }, h("span", { class: "dot " + (n.online ? (n.active.length ? "busy" : "on") : "") }), h("h3", null, n.name),
         h("span", { class: "hint" }, n.online ? (n.active.length ? `${n.active.length}/${n.max_conc} busy` : "idle") : `offline · seen ${ago(n.last_seen)}`),
-        n.updating_to && h("span", { class: "chip warn", title: "The runner takes no new work and updates itself as soon as its running sessions are done" }, `updating to ${n.updating_to} after current work`),
+        n.updating_to && h("span", { class: "chip warn", title: "The runner updates itself as soon as its running sessions are done. It takes no new work for up to 15 minutes while waiting, then works normally again and updates when it is next idle." }, `updating to ${n.updating_to}`),
         h("span", { class: "spacer" }),
         n.paused && h("span", { class: "chip warn" }, "paused"),
         h("button", { class: "btn small", onclick: () => save({ paused: !n.paused }) }, n.paused ? "Resume" : "Pause")),
@@ -1472,13 +1485,14 @@ function machinesView() {
         h("div", { class: "k" }, "Roles"), roles,
         h("div", { class: "k" }, "Parallel agents"), conc,
         h("div", { class: "k" }, "Extra tags"), extra,
-        h("div", { class: "k" }, "Model"), model),
+        h("div", { class: "k" }, "Model"), model,
+        h("div", { class: "k" }, "Work directory"), wsDir),
       n.active.length ? h("div", { style: { marginTop: "12px" } }, n.active.map(r => h("div", { class: "row", style: { fontSize: "13px", padding: "2px 0" } },
         h("span", { class: "dot busy" }), link(`/runs/${r.id}`, r.issue_number ? `${r.kind} #${r.issue_number} ${r.issue_title}` : `chat session`), h("span", { class: "hint" }, r.project_slug + " · " + ago(r.started_at))))) : null,
       h("div", { class: "row", style: { justifyContent: "flex-end", marginTop: "10px" } },
         h("button", { class: "btn small danger ghost", onclick: async () => { if (confirm(`Remove ${n.name}? This revokes its token: the runner on that machine stops working until it is enrolled again.`)) { await api("DELETE", `/api/nodes/${n.id}`); loadOverview().then(render); } } }, "Remove")));
   }
-  return { el, load: async () => { await loadOverview(); render(); loadSetup(); }, onEvent: debounce(ev => { if (ev.type === "nodes" || ev.type === "projects") loadOverview().then(() => render()); }, 400) };
+  return { el, load: async () => { await loadOverview(); render(); loadSetup(); loadRunnerSettings(); }, onEvent: debounce(ev => { if (ev.type === "nodes" || ev.type === "projects") loadOverview().then(() => render()); }, 400) };
 }
 
 // ---------- users & account ----------

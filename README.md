@@ -89,7 +89,11 @@ You can pause a machine at any time.
 | `--caps` | – | Extra capability tags in addition to the auto-detected ones |
 | `--claude` | auto | Path to the `claude` CLI |
 | `--permission-mode` | `bypassPermissions` | Passed to Claude Code. Agents run unattended, so use machines/accounts where that's acceptable. |
-| `--workdir` | `~/.multiclaude` | Workspaces (one reusable checkout per parallel slot) |
+| `--workdir` | `~/.multiclaude` | Runner state (credentials, tools) and, by default, the workspaces (one reusable checkout per parallel slot) |
+
+**Work directory for project checkouts:** set it once for all machines under Machines → *Work directory* (e.g. `/data/multiclaude` or `~/work/multiclaude`; `~` and `$VARS` are expanded on each machine), or per machine on its card. Checkouts go to `<dir>/<project>/slot-N`. It applies to new sessions; an unusable path falls back to `<workdir>/workspaces` and the session log says why.
+
+**Memory:** agent processes (and the builds/tests they start) are the kernel's preferred out-of-memory victims, and the runner's systemd unit uses `OOMPolicy=continue` (existing installs get a drop-in automatically). One runaway test suite then ends only that session instead of the runner and every other session on the machine.
 
 Auto-detected capabilities include:
 

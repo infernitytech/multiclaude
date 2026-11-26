@@ -298,3 +298,4 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--border2
 .drop-zone.drop { outline: 2px dashed var(--accent); background: var(--accent-soft); }
 .chip.model { background: var(--accent-soft); color: var(--accent-text); font-family: var(--mono); }
 .agent-tile.stopping { opacity: .55; }
+.card-wait { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.35; }

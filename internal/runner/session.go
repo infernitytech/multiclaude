@@ -330,7 +330,11 @@ func (s *session) run() proto.RunFinish {
 	if s.multiRepo() {
 		wsKey += "~multi" // different layout: one subdirectory per repository
 	}
-	s.dir = s.r.acquireWorkspace(wsKey)
+	root, problem := s.r.workspaceRoot(s.a.WorkspaceRoot)
+	if problem != "" {
+		s.info("%s", problem)
+	}
+	s.dir = s.r.acquireWorkspace(root, wsKey)
 	defer s.r.releaseWorkspace(s.dir)
 	s.info("starting %s run in project %s", s.a.Kind, s.a.ProjectSlug)
 
@@ -430,6 +434,10 @@ func (s *session) cancel() {
 	}
 }
 
+// idleClose: after a result with messages still nominally pending, stdin is
+// closed once output has been quiet this long.
+var idleClose = 20 * time.Second
+
 func (s *session) runClaude(messages []string) error {
 	mcpCfg := map[string]any{"mcpServers": map[string]any{
 		"multiclaude": map[string]any{
@@ -488,6 +496,7 @@ func (s *session) runClaude(messages []string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting claude: %w", err)
 	}
+	protectFromOOM(cmd.Process.Pid) // the agent and what it starts die before the runner does
 	s.mu.Lock()
 	s.proc = cmd
 	if s.cancelled { // cancelled while claude was starting
@@ -513,7 +522,11 @@ func (s *session) runClaude(messages []string) error {
 	// Claude may fold a message injected mid-turn into the running turn, so
 	// "one result per message" doesn't always hold. After a result with
 	// messages still nominally pending, close stdin once output goes quiet.
+	// The quiet timer is re-armed on every line after a result until a new
+	// turn starts; otherwise trailing output (system/status events) would
+	// cancel it for good and the session would sit at "turn finished" forever.
 	var idle *time.Timer
+	afterResult := false
 	defer func() {
 		if idle != nil {
 			idle.Stop()
@@ -557,7 +570,14 @@ func (s *session) runClaude(messages []string) error {
 			if done {
 				closeStdin()
 			} else {
-				idle = time.AfterFunc(20*time.Second, closeStdin)
+				afterResult = true
+				idle = time.AfterFunc(idleClose, closeStdin)
+			}
+		} else if afterResult {
+			if ev.Type == "assistant" {
+				afterResult = false // a new turn is running; its result decides
+			} else {
+				idle = time.AfterFunc(idleClose, closeStdin)
 			}
 		}
 	}

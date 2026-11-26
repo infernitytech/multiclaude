@@ -82,6 +82,7 @@ After=network-online.target
 ExecStart=$BIN_DIR/multiclaude-runner run --server $SERVER $ARGS
 Restart=always
 RestartSec=5
+OOMPolicy=continue
 Environment=PATH=$PATH
 
 [Install]

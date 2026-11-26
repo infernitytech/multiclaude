@@ -800,3 +800,22 @@ func normalizeImport(u string) string {
 	}
 	return u
 }
+
+// apiRunnerSettings: settings every machine follows, e.g. where runners keep
+// project checkouts (each machine can override it on its card).
+func (s *Server) apiRunnerSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "PUT" {
+		var in struct {
+			WorkspaceDir *string `json:"workspace_dir"`
+		}
+		if err := readJSON(r, &in); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		if in.WorkspaceDir != nil {
+			s.setSetting("workspace_dir", strings.TrimSpace(*in.WorkspaceDir))
+		}
+		s.emit(event{Type: "nodes"})
+	}
+	writeJSON(w, map[string]any{"workspace_dir": s.setting("workspace_dir")})
+}

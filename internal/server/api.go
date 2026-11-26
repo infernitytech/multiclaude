@@ -50,6 +50,10 @@ func (s *Server) projectCounts(p *Project) {
 		rows.Scan(&st, &c)
 		p.Counts[st] = c
 	}
+	// Queued: claimable work nobody runs yet (To do + reviews waiting for a reviewer).
+	var q int
+	s.db.QueryRow(`SELECT COUNT(*) FROM issues WHERE project_id=? AND run_id='' AND (status='todo' OR (status='review' AND ?='agent'))`, p.ID, p.ReviewMode).Scan(&q)
+	p.Counts["queued"] = q
 }
 
 func (s *Server) allProjects() []*Project {
@@ -365,6 +369,7 @@ func (s *Server) apiIssues(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.markNoMachine(p.ID, items)
+		s.markWaiting(p, items)
 		writeJSON(w, map[string]any{"items": items, "total": total})
 		return
 	}
@@ -742,6 +747,7 @@ func (s *Server) apiUpdateNode(w http.ResponseWriter, r *http.Request) {
 		DisabledCaps *[]string `json:"disabled_caps"`
 		Model        *string   `json:"model"`
 		Name         *string   `json:"name"`
+		WorkspaceDir *string   `json:"workspace_dir"` // "" = use the server-wide default
 	}
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, err.Error())
@@ -768,6 +774,9 @@ func (s *Server) apiUpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Model != nil {
 		s.db.Exec(`UPDATE nodes SET model=? WHERE id=?`, strings.TrimSpace(*in.Model), n.ID)
+	}
+	if in.WorkspaceDir != nil {
+		s.db.Exec(`UPDATE nodes SET workspace_dir=? WHERE id=?`, strings.TrimSpace(*in.WorkspaceDir), n.ID)
 	}
 	if in.Name != nil && strings.TrimSpace(*in.Name) != "" {
 		s.db.Exec(`UPDATE nodes SET name=? WHERE id=?`, strings.TrimSpace(*in.Name), n.ID)

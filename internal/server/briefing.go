@@ -204,3 +204,122 @@ func (s *Server) briefing(p *Project) string {
 `)
 	return b.String()
 }
+
+// markWaiting explains, for every queued issue (To do, or a review waiting for
+// a reviewer agent), why no machine is working on it right now — the board
+// shows it so a stalled queue is visible instead of silently idle.
+func (s *Server) markWaiting(p *Project, issues []*Issue) {
+	var machines []*Node
+	running := map[string]int{}
+	leases := map[string]map[int]string{}
+	for _, i := range issues {
+		if i.RunID != "" || (i.Status != "todo" && i.Status != "review") {
+			continue
+		}
+		if machines == nil {
+			machines = s.projectMachines(p.ID)
+			for _, n := range machines {
+				running[n.ID] = s.runningCount(n.ID)
+				leases[n.ID] = s.gpuLeases(n.ID)
+			}
+		}
+		i.Waiting = s.waitReason(p, i, machines, running, leases)
+	}
+}
+
+func (s *Server) waitReason(p *Project, i *Issue, machines []*Node, running map[string]int, leases map[string]map[int]string) string {
+	role, what := "worker", "worker"
+	if i.Status == "review" {
+		switch p.ReviewMode {
+		case "human":
+			return "waiting for a human review (review mode: human)"
+		case "none":
+			return ""
+		}
+		role, what = "reviewer", "reviewer"
+	}
+	if !p.Dispatch {
+		return "work on this project is stopped (Resume to continue)"
+	}
+	if i.Status == "todo" && !s.depsDone(i) {
+		return "waiting for its dependencies to be done"
+	}
+	var prev int
+	s.db.QueryRow(`SELECT COUNT(*) FROM runs WHERE issue_id=? AND status='running'`, i.ID).Scan(&prev)
+	if prev > 0 {
+		return "waiting for its previous session to stop"
+	}
+	var withRole, capable, online, unpaused, notDraining, free []*Node
+	for _, n := range machines {
+		if n.HasRole(role) {
+			withRole = append(withRole, n)
+		}
+	}
+	if len(withRole) == 0 {
+		return fmt.Sprintf("no machine with the %s role is assigned to this project", what)
+	}
+	for _, n := range withRole {
+		if canEverRun(n, i.Requires) {
+			capable = append(capable, n)
+		}
+	}
+	if len(capable) == 0 {
+		return fmt.Sprintf("no %s machine has all of: %s", what, strings.Join(i.Requires, ", "))
+	}
+	names := func(ns []*Node) string {
+		var out []string
+		for _, n := range ns {
+			out = append(out, n.Name)
+		}
+		return strings.Join(out, ", ")
+	}
+	for _, n := range capable {
+		if n.Online {
+			online = append(online, n)
+		}
+	}
+	if len(online) == 0 {
+		return fmt.Sprintf("the %s machines that can take it are offline (%s)", what, names(capable))
+	}
+	for _, n := range online {
+		if !n.Paused {
+			unpaused = append(unpaused, n)
+		}
+	}
+	if len(unpaused) == 0 {
+		return fmt.Sprintf("the %s machines that can take it are paused (%s)", what, names(online))
+	}
+	for _, n := range unpaused {
+		if !drainHoldsWork(n.ID) {
+			notDraining = append(notDraining, n)
+		}
+	}
+	if len(notDraining) == 0 {
+		return fmt.Sprintf("%s: updating, no new work for a few minutes", names(unpaused))
+	}
+	for _, n := range notDraining {
+		if running[n.ID] < n.MaxConc {
+			free = append(free, n)
+		}
+	}
+	if len(free) == 0 {
+		var busy []string
+		for _, n := range notDraining {
+			busy = append(busy, fmt.Sprintf("%s %d/%d", n.Name, running[n.ID], n.MaxConc))
+		}
+		return "all slots busy (" + strings.Join(busy, ", ") + ")"
+	}
+	if need, _ := parseGPUNeed(i.Requires); need.count > 0 {
+		gpuFree := false
+		for _, n := range free {
+			if _, ok := allocGPUs(n, need, leases[n.ID]); ok {
+				gpuFree = true
+				break
+			}
+		}
+		if !gpuFree {
+			return fmt.Sprintf("waiting for a free GPU (%s)", names(free))
+		}
+	}
+	return "queued: the next free slot takes it (reviews, then priority order)" // claimable right now
+}

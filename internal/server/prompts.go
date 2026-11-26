@@ -235,6 +235,8 @@ func (s *Server) buildAssignment(runID, kind string, p *Project, i *Issue, n *No
 		Branch:       p.DefaultBranch,
 		SystemPrompt: s.systemPrompt(runID, p, n),
 		Model:        firstNonEmpty(p.Model, n.Model),
+		// machine override > server-wide default > the runner's own default
+		WorkspaceRoot: firstNonEmpty(n.WorkspaceDir, s.setting("workspace_dir")),
 	}
 	if i != nil && i.Model != "" {
 		a.Model = i.Model // issue > project > machine > Claude Code's default

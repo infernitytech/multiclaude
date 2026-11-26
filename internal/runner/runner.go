@@ -54,6 +54,8 @@ type Runner struct {
 
 	updateTried   map[string]time.Time // server versions a self-update was attempted for
 	pendingUpdate string               // newer server version: take no new work, update when idle
+	drainSince    time.Time            // when the current drain for an update began
+	drainPaused   time.Time            // a drain ran out of time: keep working (and update when idle) until then
 }
 
 func defaultWorkDir(dir string) string {
@@ -230,6 +232,7 @@ func (r *Runner) register() error {
 // Run is the main loop.
 func (r *Runner) Run(ctx context.Context) error {
 	backoff := time.Second
+	ensureOOMPolicy()
 	go r.loadLoop(ctx)
 	for {
 		if err := r.register(); err != nil {
@@ -367,12 +370,37 @@ func (r *Runner) shutdown() {
 	}
 }
 
+// workspaceRoot resolves where project checkouts go: the directory the server
+// configured (machine setting or server-wide default; "~" and $VARS expanded
+// here) or <workdir>/workspaces. An unusable directory falls back to the
+// default, with the reason, so a typo in the setting doesn't stop all work.
+func (r *Runner) workspaceRoot(configured string) (root, problem string) {
+	def := filepath.Join(r.cfg.WorkDir, "workspaces")
+	dir := strings.TrimSpace(configured)
+	if dir == "" {
+		return def, ""
+	}
+	if dir == "~" || strings.HasPrefix(dir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, dir[1:])
+		}
+	}
+	dir = os.ExpandEnv(dir)
+	if !filepath.IsAbs(dir) {
+		return def, fmt.Sprintf("workspace directory %q is not an absolute path; using %s", configured, def)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return def, fmt.Sprintf("workspace directory %s is not usable (%v); using %s", dir, err, def)
+	}
+	return filepath.Clean(dir), ""
+}
+
 // acquireWorkspace returns a reusable checkout directory for a project.
-func (r *Runner) acquireWorkspace(slug string) string {
+func (r *Runner) acquireWorkspace(root, slug string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := 1; ; i++ {
-		dir := filepath.Join(r.cfg.WorkDir, "workspaces", slug, fmt.Sprintf("slot-%d", i))
+		dir := filepath.Join(root, slug, fmt.Sprintf("slot-%d", i))
 		if !r.wsInUse[dir] {
 			r.wsInUse[dir] = true
 			return dir
