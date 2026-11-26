@@ -70,17 +70,20 @@ func DetectHardware(workdir string) proto.Hardware {
 	}
 
 	// NVIDIA
-	if out := cmdOut("nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"); out != "" {
+	if out := cmdOut("nvidia-smi", "--query-gpu=index,name,memory.total,uuid", "--format=csv,noheader,nounits"); out != "" {
 		for _, l := range strings.Split(out, "\n") {
 			parts := strings.Split(l, ",")
-			if len(parts) >= 2 {
-				mem, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-				hw.GPUs = append(hw.GPUs, proto.GPU{Vendor: "nvidia", Name: strings.TrimSpace(parts[0]), MemoryMB: mem})
+			if len(parts) >= 4 {
+				idx, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+				mem, _ := strconv.Atoi(strings.TrimSpace(parts[2]))
+				hw.GPUs = append(hw.GPUs, proto.GPU{Vendor: "nvidia", Name: strings.TrimSpace(parts[1]), MemoryMB: mem,
+					Index: idx, HasIndex: err == nil, UUID: strings.TrimSpace(parts[3])})
 			}
 		}
 	}
 	// AMD (ROCm)
 	if out := cmdOut("rocm-smi", "--showproductname", "--csv"); out != "" {
+		vram := amdVRAM()
 		for i, l := range strings.Split(out, "\n") {
 			if i == 0 || strings.TrimSpace(l) == "" {
 				continue
@@ -90,7 +93,11 @@ func DetectHardware(workdir string) proto.Hardware {
 			if len(f) > 1 {
 				name = strings.TrimSpace(f[1])
 			}
-			hw.GPUs = append(hw.GPUs, proto.GPU{Vendor: "amd", Name: name})
+			idx := i - 1
+			if n, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(f[0]), "card")); err == nil {
+				idx = n
+			}
+			hw.GPUs = append(hw.GPUs, proto.GPU{Vendor: "amd", Name: name, Index: idx, HasIndex: true, MemoryMB: vram[idx]})
 		}
 	}
 
@@ -187,4 +194,21 @@ func ClaudeAuth() string {
 		return "macOS keychain (assumed)"
 	}
 	return "not found — run `claude` once and log in"
+}
+
+// amdVRAM returns total VRAM in MB per rocm-smi device number.
+func amdVRAM() map[int]int {
+	out := map[int]int{}
+	for i, l := range strings.Split(cmdOut("rocm-smi", "--showmeminfo", "vram", "--csv"), "\n") {
+		f := strings.Split(l, ",")
+		if i == 0 || len(f) < 2 {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(f[0]), "card"))
+		b, err2 := strconv.ParseInt(strings.TrimSpace(f[1]), 10, 64)
+		if err == nil && err2 == nil {
+			out[n] = int(b / 1024 / 1024)
+		}
+	}
+	return out
 }

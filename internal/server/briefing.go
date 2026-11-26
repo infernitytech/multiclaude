@@ -29,7 +29,7 @@ func (s *Server) schedulabilityNote(p *Project, i *Issue) string {
 	}
 	var online, offline []string
 	for _, n := range s.projectMachines(p.ID) {
-		if n.HasRole("worker") && subset(i.Requires, n.AllCaps()) {
+		if n.HasRole("worker") && canEverRun(n, i.Requires) {
 			if n.Online {
 				online = append(online, n.Name)
 			} else {
@@ -68,6 +68,19 @@ func (s *Server) hardwareRouting(p *Project) string {
 		if len(n.DisabledCaps) > 0 {
 			fmt.Fprintf(&b, "  switched off by the humans (reserved for something else — don't route work to them or use them there): %s\n", strings.Join(n.DisabledCaps, ", "))
 		}
+		if gpus := nodeGPUs(n); len(gpus) > 1 {
+			var res []string
+			for i := range gpus {
+				if gpuReserved(n, i) {
+					res = append(res, fmt.Sprintf("GPU %d", i))
+				}
+			}
+			fmt.Fprintf(&b, "  %d GPUs → issues can ask for up to gpus:%d here", len(gpus), len(gpus)-len(res))
+			if len(res) > 0 {
+				fmt.Fprintf(&b, " (%s reserved by the humans)", strings.Join(res, ", "))
+			}
+			b.WriteString("\n")
+		}
 		for _, c := range n.AllCaps() {
 			capCount[strings.ToLower(c)]++
 		}
@@ -85,6 +98,7 @@ func (s *Server) hardwareRouting(p *Project) string {
 		b.WriteString("- All machines have the same capabilities, so \"requires\" is rarely needed.\n")
 	}
 	b.WriteString(`- Rules: an issue is only given to a machine that has ALL capabilities in its "requires". Leave "requires" empty when any machine can do the work — that keeps it parallel. Set it only for real needs: gpu/cuda/nvidia/rocm/mps for GPU work (training, CUDA kernels, GPU benchmarks), macos for Xcode/iOS/macOS builds, bigmem for very memory-hungry jobs, a tool name (docker, blender, unity, godot, ffmpeg, nvcc, …) when that tool must be installed. Use only capability names from the list above; anything else makes the issue unclaimable (create_issue/update_issue warn you).
+- GPUs are handed out exclusively per session: "gpu" (or cuda/rocm/…) = one GPU, "gpus:N" = N GPUs on the same machine (multi-GPU training, DDP, big models split across GPUs), "vram:N" = every assigned GPU has at least N GB. Several GPU issues run in parallel on a multi-GPU machine, one per free GPU — so prefer several 1-GPU issues (e.g. a hyper-parameter sweep) over one big job when the work allows it, and ask for gpus:N only when one job really needs several GPUs at once.
 - Split mixed work: CPU-only preparation (code, data pipeline, tests) as one issue, the hardware-specific run as another with "requires" and "depends_on". Keep hardware-bound issues small, since few machines can take them; machines with special capabilities prefer such issues.
 - If you need hardware this machine doesn't have, don't fake it: create an issue with the right "requires" (or call block_issue if your own assignment can't be done here).
 `)

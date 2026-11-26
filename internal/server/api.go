@@ -560,13 +560,14 @@ func (s *Server) apiRunMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		id := newID()
 		a := s.buildAssignment(id, "chat", p, nil, n, chatPrompt("human", in.Body))
+		s.gpuSetup(a, n, nil, false)
 		a.ResumeSession = run.SessionID
 		if run.IssueID != nil {
 			if i, err := s.issueByID(*run.IssueID); err == nil {
 				a.Branch = i.Branch
 			}
 		}
-		s.insertRun(id, p.ID, run.IssueID, n.ID, "chat", a.Prompt)
+		s.insertRun(id, p.ID, run.IssueID, n.ID, "chat", a.Prompt, nil)
 		s.db.Exec(`UPDATE runs SET kind='chat' WHERE id=?`, id)
 		s.expectReply(id)
 		s.enqueue(n.ID, proto.Command{Type: "assign", Assignment: a})

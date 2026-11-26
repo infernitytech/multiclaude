@@ -10,6 +10,11 @@ type GPU struct {
 	Vendor   string `json:"vendor"`
 	Name     string `json:"name"`
 	MemoryMB int    `json:"memory_mb"`
+	// Index is the vendor tool's device number (nvidia-smi / rocm-smi), used for
+	// CUDA_VISIBLE_DEVICES etc. HasIndex is false for runners that predate it.
+	Index    int    `json:"index"`
+	HasIndex bool   `json:"has_index,omitempty"`
+	UUID     string `json:"uuid,omitempty"`
 }
 
 type Hardware struct {
@@ -82,6 +87,8 @@ type Assignment struct {
 	// Repos lists every repository of the project (multi-repo projects).
 	// Older servers leave it empty: then RepoURL/BaseBranch describe the only repo.
 	Repos []RepoSpec `json:"repos,omitempty"`
+	// Env is added to the agent's environment (e.g. CUDA_VISIBLE_DEVICES for its GPUs).
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // RepoSpec is one repository in the agent's workspace.
@@ -162,7 +169,7 @@ var Tools = []Tool{
 		})},
 	{"get_issue", "Get one issue with its full description, comments and history.",
 		obj(map[string]any{"number": num}, "number")},
-	{"create_issue", "Create a new issue on the shared board so that some agent (or a human) picks it up. Use for follow-up work you discover, or to split large work into parallel pieces. 'requires' lists capabilities a machine must have — all of them (e.g. gpu, cuda, docker); only use capabilities listed under \"Hardware routing\" in your instructions, otherwise no machine can take the issue. 'depends_on' lists issue numbers that must be done first.",
+	{"create_issue", "Create a new issue on the shared board so that some agent (or a human) picks it up. Use for follow-up work you discover, or to split large work into parallel pieces. 'requires' lists capabilities a machine must have — all of them (e.g. gpu, cuda, docker; GPU jobs can also ask for gpus:N = N GPUs on one machine and vram:N = at least N GB per GPU, and get them exclusively); only use capabilities listed under \"Hardware routing\" in your instructions, otherwise no machine can take the issue. 'depends_on' lists issue numbers that must be done first.",
 		obj(map[string]any{
 			"title":      str,
 			"body":       desc(str, "Markdown description with enough context for another agent to work on it independently"),

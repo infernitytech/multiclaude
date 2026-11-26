@@ -371,7 +371,6 @@ func (s *Server) claimWork(n *Node, slots int) []proto.Command {
 	rows.Close()
 
 	projects := map[int64]*Project{}
-	caps := n.AllCaps()
 	var cands []candidate
 	for _, i := range issues {
 		p := projects[i.ProjectID]
@@ -381,7 +380,7 @@ func (s *Server) claimWork(n *Node, slots int) []proto.Command {
 			}
 			projects[i.ProjectID] = p
 		}
-		if !p.Dispatch || !subset(i.Requires, caps) {
+		if !p.Dispatch || !canEverRun(n, i.Requires) {
 			continue
 		}
 		switch i.Status {
@@ -416,9 +415,15 @@ func (s *Server) claimWork(n *Node, slots int) []proto.Command {
 	})
 
 	var cmds []proto.Command
+	leased := s.gpuLeases(n.ID)
 	for _, c := range cands {
 		if len(cmds) >= slots {
 			break
+		}
+		need, _ := parseGPUNeed(c.issue.Requires)
+		gpus, ok := allocGPUs(n, need, leased)
+		if !ok {
+			continue // not enough free GPUs right now; it gets them when a GPU run ends
 		}
 		runID := newID()
 		kind, newStatus := "work", "in_progress"
@@ -436,7 +441,11 @@ func (s *Server) claimWork(n *Node, slots int) []proto.Command {
 		}
 		c.issue.Branch = branch
 		a := s.buildAssignment(runID, kind, c.project, c.issue, n, "")
-		s.insertRun(runID, c.project.ID, &c.issue.ID, n.ID, kind, a.Prompt)
+		s.gpuSetup(a, n, gpus, need.count > 0)
+		s.insertRun(runID, c.project.ID, &c.issue.ID, n.ID, kind, a.Prompt, gpus)
+		for _, g := range gpus {
+			leased[g] = runID
+		}
 		cmds = append(cmds, proto.Command{Type: "assign", Assignment: a})
 		verb := "started working on"
 		if c.review {
@@ -461,9 +470,9 @@ func (s *Server) depsDone(i *Issue) bool {
 	return true
 }
 
-func (s *Server) insertRun(id string, pid int64, issueID *int64, nodeID, kind, prompt string) {
-	s.db.Exec(`INSERT INTO runs(id,project_id,issue_id,node_id,kind,status,prompt,started_at) VALUES(?,?,?,?,?,'running',?,?)`,
-		id, pid, issueID, nodeID, kind, prompt, now())
+func (s *Server) insertRun(id string, pid int64, issueID *int64, nodeID, kind, prompt string, gpus []int) {
+	s.db.Exec(`INSERT INTO runs(id,project_id,issue_id,node_id,kind,status,prompt,started_at,gpus) VALUES(?,?,?,?,?,'running',?,?,?)`,
+		id, pid, issueID, nodeID, kind, prompt, now(), jsonStr(append([]int{}, gpus...)))
 	s.emit(event{Type: "runs", ProjectID: pid})
 }
 
@@ -472,8 +481,9 @@ func (s *Server) insertRun(id string, pid int64, issueID *int64, nodeID, kind, p
 func (s *Server) startChatRun(p *Project, n *Node, author, text string) string {
 	runID := newID()
 	a := s.buildAssignment(runID, "chat", p, nil, n, chatPrompt(author, text))
+	s.gpuSetup(a, n, nil, false)
 	s.db.QueryRow(`SELECT session_id FROM chat_sessions WHERE node_id=? AND project_id=?`, n.ID, p.ID).Scan(&a.ResumeSession)
-	s.insertRun(runID, p.ID, nil, n.ID, "chat", a.Prompt)
+	s.insertRun(runID, p.ID, nil, n.ID, "chat", a.Prompt, nil)
 	s.expectReply(runID)
 	s.enqueue(n.ID, proto.Command{Type: "assign", Assignment: a})
 	s.emit(event{Type: "nodes"})

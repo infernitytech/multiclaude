@@ -18,9 +18,7 @@ func hwSummary(n *Node) string {
 	if hw.MemoryGB > 0 {
 		parts = append(parts, fmt.Sprintf("%.0f GB RAM", hw.MemoryGB))
 	}
-	for _, g := range hw.GPUs {
-		parts = append(parts, fmt.Sprintf("GPU %s (%d MB)", g.Name, g.MemoryMB))
-	}
+	parts = append(parts, gpuSummary(hw.GPUs)...)
 	return strings.Join(parts, ", ")
 }
 

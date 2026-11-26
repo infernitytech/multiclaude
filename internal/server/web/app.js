@@ -353,7 +353,7 @@ function parseQuick(text) {
     if (!w) continue;
     if (w.toLowerCase() in pr) out.priority = pr[w.toLowerCase()];
     else if (/^#[\w.-]+$/.test(w) && !/^#\d+$/.test(w)) out.labels.push(w.slice(1));
-    else if (/^\+[\w.-]+$/.test(w)) out.requires.push(w.slice(1));
+    else if (/^\+[\w.:#-]+$/.test(w)) out.requires.push(w.slice(1));
     else out.title.push(w);
   }
   return { ...out, title: out.title.join(" ") };
@@ -662,7 +662,7 @@ async function openIssue(slug, number, fromRoute) {
         h("div", { class: "k" }, "Status"), h("div", { class: "row" }, statusSel, i.run_id && h("span", { class: "row hint" }, h("span", { class: "dot busy" }), `${i.assignee} is ${i.status === "review" ? "reviewing" : "working"} · `, link(`/runs/${i.run_id}`, "watch live"))),
         h("div", { class: "k" }, "Priority"), h("div", { class: "seg" }, PRIOS.map((p, n) => h("button", { class: n === i.priority ? "on" : "", onclick: () => save({ priority: n }).then(render) }, p))),
         h("div", { class: "k" }, "Labels"), listInput("labels", "e.g. backend, ui"),
-        h("div", { class: "k", title: "Only machines with all these capabilities can claim the issue" }, "Requires"), listInput("requires", "capabilities, e.g. gpu, cuda, docker"),
+        h("div", { class: "k", title: "Only machines with all these capabilities can claim the issue" }, "Requires"), listInput("requires", "capabilities, e.g. gpu, gpus:2, vram:48, docker"),
         h("div", { class: "k" }, "Depends on"), listInput("depends_on", "issue numbers, e.g. 3, 7"),
         h("div", { class: "k" }, "Branch"), h("div", { class: "mono hint" }, i.branch || `issue-${i.number} (when started)`),
         h("div", { class: "k" }, "Created"), h("div", { class: "hint" }, `${ago(i.created_at)} by ${i.created_by}`)),
@@ -1237,7 +1237,7 @@ function machinesView() {
         h("div", { class: "k" }, "Claude"), h("div", null, n.claude_version || "?", " ", h("span", { class: "chip " + (authOk ? "ok" : "bad") }, n.claude_auth || "auth unknown")),
         h("div", { class: "k" }, "CPU"), h("div", null, `${hw.cpu_model || "?"} · ${hw.cpu_cores} cores`),
         h("div", { class: "k" }, "Memory"), h("div", null, `${hw.memory_gb} GB · ${hw.disk_free_gb} GB disk free`),
-        h("div", { class: "k" }, "GPU"), h("div", null, (hw.gpus || []).length ? hw.gpus.map(g => `${g.name}${g.memory_mb ? ` (${Math.round(g.memory_mb / 1024)} GB)` : ""}`).join(", ") : h("span", { class: "hint" }, "none")),
+        h("div", { class: "k" }, (hw.gpus || []).length > 1 ? `GPUs (${hw.gpus.length})` : "GPU"), h("div", null, (hw.gpus || []).length ? gpuList(n, hw.gpus, save) : h("span", { class: "hint" }, "none")),
         h("div", { class: "k" }, "System"), h("div", null, `${hw.os}/${hw.arch} · runner ${n.runner_version}`)),
       h("div", { class: "row wrap", style: { gap: "4px", marginBottom: "4px" } },
         [...n.caps, ...n.extra_caps].map(c => {
@@ -1332,6 +1332,20 @@ function githubCard() {
   };
   api("GET", "/api/settings/github").then(render);
   return card;
+}
+
+// One line per GPU: which run holds it; click to reserve it for something else ("gpu#i" switched off).
+function gpuList(n, gpus, save) {
+  const holder = {};
+  for (const r of n.active) for (const g of r.gpus || []) holder[g] = r;
+  return h("div", { class: "gpus" }, gpus.map((g, i) => {
+    const tag = `gpu#${i}`, off = (n.disabled_caps || []).some(d => d.toLowerCase() === tag), r = holder[i];
+    return h("div", { class: "row", style: { gap: "6px", fontSize: "13px" } },
+      h("span", { class: "mono hint" }, `#${i}`), h("span", null, g.name + (g.memory_mb ? ` · ${Math.round(g.memory_mb / 1024)} GB` : "")),
+      r ? h("span", { class: "chip warn", title: `run ${r.id}` }, r.issue_number ? `busy: ${r.project_slug} #${r.issue_number}` : `busy: ${r.kind}`) : off ? null : h("span", { class: "chip ok" }, "free"),
+      gpus.length > 1 ? h("span", { class: "chip click cap " + (off ? "off" : ""), title: off ? "Reserved: no agent gets this GPU. Click to release it." : "Click to reserve this GPU (agents won't get it; running ones continue)",
+        onclick: () => save({ disabled_caps: off ? n.disabled_caps.filter(d => d.toLowerCase() !== tag) : [...(n.disabled_caps || []), tag] }) }, off ? "⊘ reserved" : "reserve") : null);
+  }));
 }
 
 // ---------- login ----------

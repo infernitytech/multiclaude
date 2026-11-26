@@ -137,6 +137,7 @@ func openDB(path string) (*sql.DB, error) {
 	for _, m := range []string{
 		`ALTER TABLE nodes ADD COLUMN disabled_caps TEXT NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE nodes ADD COLUMN token_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN gpus TEXT NOT NULL DEFAULT '[]'`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return nil, fmt.Errorf("migration %q: %w", m, err)
@@ -328,16 +329,19 @@ type Run struct {
 	IssueTitle  string    `json:"issue_title,omitempty"`
 	ProjectSlug string    `json:"project_slug,omitempty"`
 	Activity    *Activity `json:"activity,omitempty"` // live, in-memory (running runs only)
+	GPUs        []int     `json:"gpus"`               // GPU numbers reserved for this run
 }
 
-const runSelect = `SELECT r.id,r.project_id,r.issue_id,r.node_id,r.kind,r.status,r.prompt,r.started_at,r.ended_at,r.session_id,r.cost_usd,r.result,r.error,r.completed,r.verdict,
+const runSelect = `SELECT r.id,r.project_id,r.issue_id,r.node_id,r.kind,r.status,r.prompt,r.started_at,r.ended_at,r.session_id,r.cost_usd,r.result,r.error,r.completed,r.verdict,r.gpus,
  COALESCE(n.name,''),COALESCE(i.number,0),COALESCE(i.title,''),COALESCE(p.slug,'')
  FROM runs r LEFT JOIN nodes n ON n.id=r.node_id LEFT JOIN issues i ON i.id=r.issue_id LEFT JOIN projects p ON p.id=r.project_id `
 
 func scanRun(r interface{ Scan(...any) error }) (*Run, error) {
 	x := &Run{}
+	var gpus string
 	err := r.Scan(&x.ID, &x.ProjectID, &x.IssueID, &x.NodeID, &x.Kind, &x.Status, &x.Prompt, &x.StartedAt, &x.EndedAt, &x.SessionID,
-		&x.CostUSD, &x.Result, &x.Error, &x.Completed, &x.Verdict, &x.NodeName, &x.IssueNumber, &x.IssueTitle, &x.ProjectSlug)
+		&x.CostUSD, &x.Result, &x.Error, &x.Completed, &x.Verdict, &gpus, &x.NodeName, &x.IssueNumber, &x.IssueTitle, &x.ProjectSlug)
+	json.Unmarshal([]byte(gpus), &x.GPUs)
 	return x, err
 }
 

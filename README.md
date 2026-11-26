@@ -115,6 +115,22 @@ Auto-detected capabilities include:
 6. **Project instructions** (Settings) are appended to every agent's system prompt. Put build/test commands and conventions there.
 7. **Repositories & mirrors** (Settings) — see below.
 
+### Machines with several GPUs
+
+Every GPU is detected individually (model, memory, device number). GPUs are handed out **exclusively per session**, so several GPU agents can run on one machine without fighting over a card:
+
+| `requires` | Gets |
+|---|---|
+| `gpu` (or `cuda`, `nvidia`, `rocm`, `mps`) | 1 GPU |
+| `gpus:N` | N GPUs on the same machine (DDP, model parallelism) |
+| `vram:N` | only GPUs with at least N GB memory |
+
+- The session sees only its GPUs (`CUDA_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES`), and its prompt says which GPUs it has, how many the machine has, and how to use them (e.g. `torchrun --nproc_per_node=N`, Docker `--gpus "device=…"`).
+- The smallest suitable GPUs are used first, keeping big ones free for big jobs. An issue waits until enough GPUs are free.
+- Sessions that didn't ask for a GPU only see GPUs that were idle when they started, and are told those aren't reserved for them.
+- Agents know every machine's GPU count and are encouraged to split work into 1-GPU issues (e.g. sweeps) when possible.
+- *Machines* shows each GPU with the issue using it; **reserve** takes a single GPU out of scheduling (e.g. for your own work). Set *Parallel agents* to at least the number of GPUs so all can be used.
+
 ### Several repositories
 
 A project starts with one repository, `/git/<slug>.git`. Add more under *Settings → Repositories & mirrors* (empty or imported from a URL); each is served at `/git/<slug>/<name>.git` with LFS, and the *Code* tab has a repository picker.

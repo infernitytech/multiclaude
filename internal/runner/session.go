@@ -444,6 +444,9 @@ func (s *session) runClaude(messages []string) error {
 		"MULTICLAUDE_PROJECT="+s.a.ProjectSlug,
 	)
 	cmd.Env = append(cmd.Env, s.r.gitEnv()...) // git push/pull from the agent's shell is authenticated
+	for k, v := range s.a.Env {                // e.g. CUDA_VISIBLE_DEVICES: only this session's GPUs
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
