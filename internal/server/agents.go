@@ -56,6 +56,14 @@ func (s *Server) projectAgents(pid int64) []*Run {
 			out = append(out, r)
 		}
 	}
+	rows.Close()
+	for _, r := range out {
+		if r.IssueID != nil {
+			var cur string
+			s.db.QueryRow(`SELECT run_id FROM issues WHERE id=?`, *r.IssueID).Scan(&cur)
+			r.Stopping = cur != r.ID
+		}
+	}
 	return out
 }
 

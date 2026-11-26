@@ -454,11 +454,12 @@ const ACT = {};
 function actText(a) { return a ? a.text : "starting…"; }
 function agentTile(r) {
   const a = ACT[r.id] || r.activity;
-  return h("div", { class: "agent-tile", "data-run": r.id, onclick: () => go(`/runs/${r.id}`), title: "Watch this agent" },
+  return h("div", { class: "agent-tile" + (r.stopping ? " stopping" : ""), "data-run": r.id, onclick: () => go(`/runs/${r.id}`), title: "Watch this agent" },
     h("div", { class: "row", style: { gap: "6px" } }, h("span", { class: "dot busy" }), h("b", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 } }, r.node_name), h("span", { class: "mono hint" }, "/" + r.id.slice(0, 6)),
       h("span", { class: "spacer" }),
       h("button", { class: "icon-btn", title: "Message this agent", onclick: e => { e.stopPropagation(); messageAgentModal(r.id, r.issue_number ? `#${r.issue_number} ${r.issue_title}` : "a chat session", `${r.node_name}/${r.id.slice(0, 6)}`); } }, "💬"),
-      h("span", { class: "chip " + (r.kind === "review" ? "req" : r.kind === "chat" ? "accent" : "") }, r.kind)),
+      r.stopping ? h("span", { class: "chip warn", title: "Its issue was moved — this session is being stopped (work so far is saved on the branch)" }, "stopping…")
+        : h("span", { class: "chip " + (r.kind === "review" ? "req" : r.kind === "chat" ? "accent" : "") }, r.kind)),
     h("div", { class: "agent-task" }, r.issue_number ? `#${r.issue_number} ${r.issue_title}` : "chat session"),
     h("div", { class: "agent-now", "data-act": r.id }, actText(a)),
     h("div", { class: "row", style: { gap: "6px" } }, h("div", { class: "hint grow", "data-actmeta": r.id }, actMeta(r, a)), modelChip(r.model)));
@@ -589,7 +590,7 @@ function boardView(info) {
     const agents = data.agents;
     if (!agents.length) { strip.classList.add("empty-strip"); add(strip, [h("span", { class: "hint" }, "No agents running on this project right now.")]); return; }
     strip.classList.remove("empty-strip");
-    add(strip, [h("div", { class: "strip-label" }, h("span", { class: "dot busy" }), `${agents.length} working`), agents.map(agentTile)]);
+    add(strip, [h("div", { class: "strip-label" }, h("span", { class: "dot busy" }), `${agents.filter(a => !a.stopping).length} working`), agents.map(agentTile)]);
     strip.querySelectorAll("[data-actmeta]").forEach(el => el._run = agents.find(r => r.id === el.dataset.actmeta));
   }
 

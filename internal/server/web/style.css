@@ -297,3 +297,4 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--border2
 #conn-banner { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 100; background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn); border-top: 0; border-radius: 0 0 10px 10px; padding: 6px 14px; font-size: 13px; box-shadow: var(--shadow); max-width: calc(100% - 32px); }
 .drop-zone.drop { outline: 2px dashed var(--accent); background: var(--accent-soft); }
 .chip.model { background: var(--accent-soft); color: var(--accent-text); font-family: var(--mono); }
+.agent-tile.stopping { opacity: .55; }

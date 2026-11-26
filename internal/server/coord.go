@@ -208,6 +208,15 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	for _, id := range orphan {
 		s.finishRun(id, proto.RunFinish{Status: "lost", Error: "runner no longer tracks this run"})
 	}
+	// The other direction: sessions the runner still runs although the server
+	// has moved on (cancel lost in transit, issue moved, project stopped, run
+	// already marked ended). Re-send the cancel until the runner reports it gone.
+	for _, id := range req.ActiveRuns {
+		if s.superseded(id) {
+			s.enqueueOnce(n.ID, proto.Command{Type: "cancel", RunID: id})
+		}
+	}
+	gen := s.pollStarted(n.ID)
 
 	s.mu.Lock()
 	ch := s.notify[n.ID]
@@ -220,6 +229,11 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	deadline := time.NewTimer(25 * time.Second)
 	defer deadline.Stop()
 	for {
+		// A newer poll from this machine (it reconnected) or a vanished client:
+		// stop here without taking commands or claiming work nobody receives.
+		if r.Context().Err() != nil || !s.currentPoll(n.ID, gen) {
+			return
+		}
 		cmds := s.drain(n.ID)
 		if n, err = s.node(req.NodeID); err == nil {
 			if free := n.MaxConc - s.runningCount(n.ID); free > 0 && !n.Paused && req.Draining == "" {
@@ -227,6 +241,10 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(cmds) > 0 {
+			if r.Context().Err() != nil || !s.currentPoll(n.ID, gen) {
+				s.requeue(n.ID, cmds) // the next poll delivers them
+				return
+			}
 			s.touch(req.NodeID)
 			writeJSON(w, proto.PollResponse{Commands: cmds, ServerVersion: proto.Version})
 			return
@@ -371,7 +389,11 @@ func (s *Server) claimWork(n *Node, slots int) []proto.Command {
 	for _, p := range n.Projects {
 		args = append(args, p)
 	}
-	rows, err := s.db.Query(`SELECT `+issueCols+` FROM issues WHERE run_id='' AND status IN ('todo','review') AND project_id IN (`+ph+`)`, args...)
+	// An issue whose previous session is still running (e.g. it was just moved
+	// back to To do and that session is shutting down) waits until it has ended:
+	// one issue never has two live sessions.
+	rows, err := s.db.Query(`SELECT `+issueCols+` FROM issues WHERE run_id='' AND status IN ('todo','review') AND project_id IN (`+ph+`)
+		AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.issue_id=issues.id AND r.status='running')`, args...)
 	if err != nil {
 		return nil
 	}

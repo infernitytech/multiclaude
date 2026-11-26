@@ -349,6 +349,7 @@ type Run struct {
 	Activity    *Activity `json:"activity,omitempty"` // live, in-memory (running runs only)
 	GPUs        []int     `json:"gpus"`               // GPU numbers reserved for this run
 	Model       string    `json:"model"`              // the model the session actually runs (from its init event)
+	Stopping    bool      `json:"stopping,omitempty"` // still running, but its issue has moved on: being cancelled
 }
 
 const runSelect = `SELECT r.id,r.project_id,r.issue_id,r.node_id,r.kind,r.status,r.prompt,r.started_at,r.ended_at,r.session_id,r.cost_usd,r.result,r.error,r.completed,r.verdict,r.gpus,r.model,

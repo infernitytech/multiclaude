@@ -490,6 +490,9 @@ func (s *session) runClaude(messages []string) error {
 	}
 	s.mu.Lock()
 	s.proc = cmd
+	if s.cancelled { // cancelled while claude was starting
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	}
 	s.stdin = stdin
 	s.pending = 0
 	for _, m := range messages {

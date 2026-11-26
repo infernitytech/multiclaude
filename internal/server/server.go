@@ -49,6 +49,7 @@ type Server struct {
 
 	mu     sync.Mutex
 	queues map[string][]proto.Command
+	polls  map[string]int // poll generation per machine; only the newest poll may take commands
 	notify map[string]chan struct{}
 	workCh chan struct{} // closed & replaced whenever new work may be claimable
 
@@ -78,6 +79,7 @@ func New(dataDir, addr, downloadDir string) (*Server, error) {
 		DataDir: dataDir, Addr: addr, DownloadDir: downloadDir, db: db,
 		hub:    newHub(),
 		queues: map[string][]proto.Command{},
+		polls:  map[string]int{},
 		notify: map[string]chan struct{}{},
 		workCh: make(chan struct{}),
 
@@ -393,6 +395,68 @@ func (s *Server) drain(nodeID string) []proto.Command {
 	q := s.queues[nodeID]
 	delete(s.queues, nodeID)
 	return q
+}
+
+// enqueueOnce adds a command unless an identical one is already waiting.
+func (s *Server) enqueueOnce(nodeID string, c proto.Command) {
+	s.mu.Lock()
+	for _, q := range s.queues[nodeID] {
+		if q.Type == c.Type && q.RunID == c.RunID {
+			s.mu.Unlock()
+			return
+		}
+	}
+	s.mu.Unlock()
+	s.enqueue(nodeID, c)
+}
+
+// requeue puts undelivered commands back at the front of the queue.
+func (s *Server) requeue(nodeID string, cmds []proto.Command) {
+	s.mu.Lock()
+	s.queues[nodeID] = append(append([]proto.Command{}, cmds...), s.queues[nodeID]...)
+	s.mu.Unlock()
+}
+
+func (s *Server) pollStarted(nodeID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.polls[nodeID]++
+	g := s.polls[nodeID]
+	if ch := s.notify[nodeID]; ch != nil { // wake an older poll so it exits
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	return g
+}
+
+func (s *Server) currentPoll(nodeID string, gen int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.polls[nodeID] == gen
+}
+
+// superseded: the server no longer wants this session to run — it ended in
+// the server's view, or its issue has moved on to another session or none.
+func (s *Server) superseded(runID string) bool {
+	run, err := s.runByID(runID)
+	if err != nil {
+		return false // unknown to us: leave it alone
+	}
+	if run.Status != "running" {
+		// ended here, still alive on the runner — but runs reporting their
+		// result are also listed as active, so only once the result is overdue
+		return run.EndedAt > 0 && now()-run.EndedAt > 30_000
+	}
+	if run.IssueID == nil {
+		return false
+	}
+	var cur string
+	if s.db.QueryRow(`SELECT run_id FROM issues WHERE id=?`, *run.IssueID).Scan(&cur) != nil {
+		return true // issue deleted
+	}
+	return cur != runID
 }
 
 // workAvailable wakes all pollers so they re-try claiming.
