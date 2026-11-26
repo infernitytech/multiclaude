@@ -74,7 +74,7 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 	nodes, _ := s.listNodes()
 	var cost float64
 	s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM runs`).Scan(&cost)
-	writeJSON(w, map[string]any{"version": proto.Version, "latest_version": latestRelease(), "projects": nz2(s.allProjects()), "nodes": nzn(nodes), "total_cost_usd": cost})
+	writeJSON(w, map[string]any{"version": proto.Version, "latest_version": latestRelease(), "open_questions": s.openQuestionCount(), "projects": nz2(s.allProjects()), "nodes": nzn(nodes), "total_cost_usd": cost})
 }
 
 func nz2(p []*Project) []*Project {
@@ -317,6 +317,7 @@ func (s *Server) apiIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.loadIssueDetail(i)
+	i.OpenQuestions = s.openQuestionsByIssue(i.ProjectID)[i.ID]
 	writeJSON(w, i)
 }
 

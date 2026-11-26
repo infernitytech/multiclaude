@@ -443,6 +443,9 @@ func (s *session) runClaude(messages []string) error {
 		"MULTICLAUDE_SERVER="+s.r.cfg.Server,
 		"MULTICLAUDE_PROJECT="+s.a.ProjectSlug,
 	)
+	if os.Getenv("MCP_TOOL_TIMEOUT") == "" {
+		cmd.Env = append(cmd.Env, "MCP_TOOL_TIMEOUT=1980000") // ask_human waits up to 30 min
+	}
 	cmd.Env = append(cmd.Env, s.r.gitEnv()...) // git push/pull from the agent's shell is authenticated
 	for k, v := range s.a.Env {                // e.g. CUDA_VISIBLE_DEVICES: only this session's GPUs
 		cmd.Env = append(cmd.Env, k+"="+v)

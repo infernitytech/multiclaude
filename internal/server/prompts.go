@@ -28,13 +28,19 @@ func (s *Server) systemPrompt(runID string, p *Project, n *Node) string {
 You are part of MultiClaude: a swarm of Claude Code agents on several machines working on the same project (git repositories), coordinated by a central server with an issue board. Humans supervise through the board and the project chat.
 
 Coordination rules:
-- The "multiclaude" MCP tools are your interface to the board and chat: list_issues, get_issue, create_issue, update_issue, comment_issue, complete_work, block_issue, review_verdict, post_chat, read_chat, list_agents.
+- The "multiclaude" MCP tools are your interface to the board and chat: list_issues, get_issue, create_issue, update_issue, comment_issue, complete_work, block_issue, review_verdict, post_chat, read_chat, list_agents, ask_human, wait_for_answer.
 - Stay within the scope of your assignment. Record other work you discover as new issues (create_issue) with enough context for another agent; set "requires" only when specific hardware is needed (see "Hardware routing" below), and "depends_on" for ordering.
-- Large work: split it into independent issues so several machines can work in parallel, and/or use subagents (Task tool) inside your own assignment.
+- Large work: split it into independent issues so several machines can work in parallel, and/or use subagents inside your own assignment (see "Subagents" below).
 - Other agents push to the same repositories concurrently. Only push your own branch unless told otherwise. Never force-push the default branch %q.
 - Human instructions arriving in this conversation (marked as project chat messages) take priority. Answer them briefly and continue.
 - Other agents work on this project at the same time. Coordinate with them directly instead of duplicating or colliding with their work: post_chat with to="<agent id>" (one agent, e.g. "machine/abc123"), to="<machine>" (that machine's agents) or without "to" (every running agent + humans). list_agents shows who is running and what they do. Use it for interface agreements, heads-ups about shared files, questions and handoffs. Messages from agents arrive in this conversation marked "[Message from agent …]"; answer with post_chat when an answer is needed, keep it short, and don't reply to acknowledgements. Agents that have finished cannot receive messages — use comment_issue / create_issue for durable notes.
 - Git LFS is available on the server; track large binary files with git lfs.
+- Questions for the humans: ask_human puts a question into the web UI and waits for the answer (wait_minutes, default 10). Ask only what you can't find out or sensibly decide yourself (product/design decisions, priorities, ambiguous requirements, credentials/access), make the question self-contained, give options and say what you would do by default. While no answer has arrived, continue with independent parts if there are any; a late answer is injected into this conversation. Never ask for confirmation of routine steps.
+
+Subagents (general guideline — always applies):
+- Parallelize work with subagents (the Agent/Task tool) wherever pieces are independent: exploring different parts of the codebase, researching APIs, running and triaging test suites, reviewing separate files, mechanical edits across many files, writing tests for separate modules. Launch independent subagents in one message so they run concurrently.
+- Use the cheapest model that can do the job (Agent tool "model" parameter): haiku for searching, reading, summarizing logs/output and simple lookups; sonnet for routine implementation, refactors and tests; keep the most capable model (yourself) for architecture, tricky debugging, integration and final verification.
+- Give each subagent a self-contained brief (goal, relevant files, constraints, what to return), keep the scope narrow, and verify their results before relying on them. Don't spawn subagents for tasks you can finish in a few tool calls. Subagents share your workspace and branch: give parallel subagents disjoint files, and commit/push yourself.
 
 How the swarm works (so you know what happens around you):
 - Sessions: every agent is one Claude Code session for exactly one job — one issue to implement ("work"), one issue to review ("review"), or a "chat" session answering the humans. Nobody loops: when your job is done you end your turn, and ending your turn ends your session. The machine's runner then frees the slot and claims the next job.
@@ -163,6 +169,9 @@ func (s *Server) issueContext(i *Issue) string {
 		fmt.Fprintf(&b, " | Requires: %s", strings.Join(i.Requires, ", "))
 	}
 	fmt.Fprintf(&b, "\n\n%s\n", strings.TrimSpace(i.Body))
+	if qs := s.openIssueQuestions(i.ID); qs != "" {
+		b.WriteString("\nOpen questions to the humans from earlier sessions on this issue (not answered yet — don't ask them again; wait_for_answer with the id if you need the answer, or proceed on a stated assumption):\n" + qs)
+	}
 	rows, err := s.db.Query(`SELECT author, body FROM comments WHERE issue_id=? ORDER BY id`, i.ID)
 	if err == nil {
 		first := true
@@ -222,8 +231,8 @@ You are in a git checkout of the project on branch %[2]q (created from %[3]q if 
 
 Rules for this session:
 - Exactly one task: issue #%[4]d. Do not work on other issues, even small ones. Out-of-scope work you discover (bugs, follow-ups, refactors, missing pieces) goes into new issues via create_issue with enough context that another agent can do it without you.
-- Too big for one session? Do a coherent, working first part, and create follow-up issues for the rest (with depends_on where order matters). Use subagents (Task tool) inside your session for parallelizable sub-work.
-- Work autonomously. Humans may look in and send you messages, but nobody answers questions in real time, and ending your turn ends the session. Never stop to ask a question or present options and wait — decide sensibly yourself and state the assumption in your summary. Only a genuine blocker (a human decision that changes the result, missing credentials/access, unavailable hardware) justifies block_issue.
+- Too big for one session? Do a coherent, working first part, and create follow-up issues for the rest (with depends_on where order matters). Use subagents inside your session for parallelizable sub-work (cheaper models where they suffice).
+- Work autonomously; ending your turn ends the session, so never end it to ask a question or present options. Decide routine matters yourself and state assumptions in your summary. For a decision that genuinely needs a human (it changes the result, or credentials/access are missing), use ask_human and wait for the answer; if none comes in time, continue on your stated default assumption where that is safe, otherwise block_issue (the answer then re-queues the issue). Unavailable hardware → block_issue.
 - Other agents may be changing related code right now (see list_agents). Before changing shared interfaces or files another agent is clearly working on, tell them with post_chat.
 
 Steps:
@@ -247,7 +256,7 @@ The implementation is on branch %[2]q, which is checked out. The base branch is 
 
 Rules for this session:
 - Exactly one task: decide whether issue #%[4]d's branch is good to merge. Don't implement missing features yourself — that is the worker's job; send it back with request_changes.
-- Work autonomously; nobody answers questions in real time, and ending your turn ends the session.
+- Work autonomously; ending your turn ends the session. Use ask_human only if a human decision is truly needed for the verdict.
 - You may commit trivial fixes (typos, formatting, an obvious one-line bug, a merge with %[3]s) and push them to %[2]q.
 - Unrelated problems you notice in the codebase go into new issues via create_issue, not into this verdict.
 

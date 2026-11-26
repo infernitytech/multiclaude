@@ -18,7 +18,9 @@ import (
 // MultiClaude server. Claude Code launches it via --mcp-config.
 func ServeMCP(server, runID string, in io.Reader, out io.Writer) error {
 	server = strings.TrimRight(server, "/")
-	client := &http.Client{Timeout: 2 * time.Minute}
+	// Long timeout: ask_human may wait for a human answer (the server caps one
+	// call at X-MC-Max-Wait seconds).
+	client := &http.Client{Timeout: 32 * time.Minute}
 	enc := json.NewEncoder(out)
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 1<<20), 32<<20)
@@ -69,6 +71,7 @@ func ServeMCP(server, runID string, in io.Reader, out io.Writer) error {
 			var res proto.AgentResult
 			hreq, _ := http.NewRequest("POST", server+"/api/agent/call", bytes.NewReader(b))
 			hreq.Header.Set("Content-Type", "application/json")
+			hreq.Header.Set("X-MC-Max-Wait", "1800")
 			if tok := os.Getenv("MC_TOKEN"); tok != "" {
 				hreq.Header.Set("Authorization", "Bearer "+tok)
 			}

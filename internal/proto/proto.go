@@ -29,6 +29,28 @@ type Hardware struct {
 	Tools      []string `json:"tools"`
 }
 
+// Load is a machine's current utilisation, reported every few seconds.
+type Load struct {
+	TS          int64     `json:"ts"`
+	CPUPct      float64   `json:"cpu_pct"` // 0–100 over all cores
+	Load1       float64   `json:"load1"`
+	MemUsedGB   float64   `json:"mem_used_gb"`
+	MemTotalGB  float64   `json:"mem_total_gb"`
+	DiskUsedGB  float64   `json:"disk_used_gb"` // over all local disks
+	DiskTotalGB float64   `json:"disk_total_gb"`
+	GPUs        []GPULoad `json:"gpus,omitempty"`
+	// Account is re-read with every report so a re-login shows up without a restart.
+	Account string `json:"account,omitempty"`
+}
+
+type GPULoad struct {
+	Vendor     string  `json:"vendor"`
+	Index      int     `json:"index"` // vendor device number, as in GPU.Index
+	UtilPct    float64 `json:"util_pct"`
+	MemUsedMB  int     `json:"mem_used_mb"`
+	MemTotalMB int     `json:"mem_total_mb"`
+}
+
 type RegisterRequest struct {
 	NodeID         string   `json:"node_id"`
 	Name           string   `json:"name"`
@@ -39,7 +61,9 @@ type RegisterRequest struct {
 	ClaudePath     string   `json:"claude_path"`
 	ClaudeVersion  string   `json:"claude_version"`
 	ClaudeAuth     string   `json:"claude_auth"`
-	RunnerVersion  string   `json:"runner_version"`
+	// ClaudeAccount is the account Claude Code is logged in with (e.g. "Jane <jane@example.com> · Max").
+	ClaudeAccount string `json:"claude_account,omitempty"`
+	RunnerVersion string `json:"runner_version"`
 	// JoinToken enrolls a new machine; afterwards it authenticates with its node token.
 	JoinToken string `json:"join_token,omitempty"`
 }
@@ -185,6 +209,15 @@ var Tools = []Tool{
 		obj(map[string]any{"number": num, "body": str}, "number", "body")},
 	{"complete_work", "Call when your assigned issue is implemented, committed and pushed to your branch. Hands it over to review.",
 		obj(map[string]any{"summary": desc(str, "What you changed and how it was verified")}, "summary")},
+	{"ask_human", "Ask the humans a question and (by default) wait for the answer. The question appears in the MultiClaude web UI (Questions page, project chat). Use it for decisions only a human can make (product/design choices, priorities, credentials or access, ambiguous requirements) — not for things you can find out or decide sensibly yourself. Offer concrete options when possible. If the wait ends without an answer you get the question id: keep waiting with wait_for_answer, or continue and the answer is delivered into your session later.",
+		obj(map[string]any{
+			"question":     desc(str, "The question, self-contained: a human reads it without your context"),
+			"context":      desc(str, "Optional background: what you found, what you'd do by default and why"),
+			"options":      desc(strs, "Optional answer choices shown as buttons, e.g. [\"Use PostgreSQL\", \"Use SQLite\"]"),
+			"wait_minutes": desc(num, "How long to wait for the answer in this call (default 10; 0 = don't wait, continue and get the answer as a message later)"),
+		}, "question")},
+	{"wait_for_answer", "Keep waiting for the answer to a question asked with ask_human.",
+		obj(map[string]any{"id": desc(num, "question id from ask_human"), "wait_minutes": desc(num, "default 10")}, "id")},
 	{"block_issue", "Call when you cannot proceed with the assigned issue and need a human (missing info, credentials, design decision).",
 		obj(map[string]any{"reason": str}, "reason")},
 	{"review_verdict", "Reviewers only: approve (branch gets merged into the base branch) or request changes (issue goes back to the queue with your comment).",

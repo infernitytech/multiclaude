@@ -179,6 +179,7 @@ func (r *Runner) RegisterRequest() proto.RegisterRequest {
 		ClaudePath:     r.cfg.ClaudePath,
 		ClaudeVersion:  cmdOut(r.cfg.ClaudePath, "--version"),
 		ClaudeAuth:     ClaudeAuth(),
+		ClaudeAccount:  ClaudeAccount(),
 		RunnerVersion:  proto.Version,
 	}
 }
@@ -219,6 +220,7 @@ func (r *Runner) register() error {
 // Run is the main loop.
 func (r *Runner) Run(ctx context.Context) error {
 	backoff := time.Second
+	go r.loadLoop(ctx)
 	for {
 		if err := r.register(); err != nil {
 			log.Printf("register failed: %v (retrying in %s)", err, backoff)

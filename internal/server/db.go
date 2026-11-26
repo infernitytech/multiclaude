@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"multiclaude/internal/proto"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -130,7 +132,7 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	// A single connection serialises writes and makes claim transactions trivially atomic.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema + authSchema + repoSchema); err != nil {
+	if _, err := db.Exec(schema + authSchema + repoSchema + questionSchema); err != nil {
 		return nil, err
 	}
 	// Additive migrations for databases created by older versions.
@@ -138,6 +140,7 @@ func openDB(path string) (*sql.DB, error) {
 		`ALTER TABLE nodes ADD COLUMN disabled_caps TEXT NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE nodes ADD COLUMN token_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN gpus TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE nodes ADD COLUMN claude_account TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return nil, fmt.Errorf("migration %q: %w", m, err)
@@ -196,26 +199,28 @@ func scanProject(r interface{ Scan(...any) error }) (*Project, error) {
 }
 
 type Issue struct {
-	ID        int64     `json:"id"`
-	ProjectID int64     `json:"project_id"`
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	Status    string    `json:"status"`
-	Priority  int       `json:"priority"`
-	Labels    []string  `json:"labels"`
-	Requires  []string  `json:"requires"`
-	DependsOn []int     `json:"depends_on"`
-	Assignee  string    `json:"assignee"`
-	RunID     string    `json:"run_id"`
-	Attempts  int       `json:"attempts"`
-	Branch    string    `json:"branch"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt int64     `json:"created_at"`
-	UpdatedAt int64     `json:"updated_at"`
-	Sort      float64   `json:"sort"`
-	Comments  []Comment `json:"comments"`
-	Runs      []Run     `json:"runs"`
+	ID        int64    `json:"id"`
+	ProjectID int64    `json:"project_id"`
+	Number    int      `json:"number"`
+	Title     string   `json:"title"`
+	Body      string   `json:"body"`
+	Status    string   `json:"status"`
+	Priority  int      `json:"priority"`
+	Labels    []string `json:"labels"`
+	Requires  []string `json:"requires"`
+	DependsOn []int    `json:"depends_on"`
+	Assignee  string   `json:"assignee"`
+	RunID     string   `json:"run_id"`
+	// OpenQuestions counts unanswered ask_human questions (filled for board/detail views).
+	OpenQuestions int       `json:"open_questions,omitempty"`
+	Attempts      int       `json:"attempts"`
+	Branch        string    `json:"branch"`
+	CreatedBy     string    `json:"created_by"`
+	CreatedAt     int64     `json:"created_at"`
+	UpdatedAt     int64     `json:"updated_at"`
+	Sort          float64   `json:"sort"`
+	Comments      []Comment `json:"comments"`
+	Runs          []Run     `json:"runs"`
 }
 
 const issueCols = `id,project_id,number,title,body,status,priority,labels,requires,depends_on,assignee,run_id,attempts,branch,created_by,created_at,updated_at,sort`
@@ -253,6 +258,8 @@ type Node struct {
 	ClaudePath    string          `json:"claude_path"`
 	ClaudeVersion string          `json:"claude_version"`
 	ClaudeAuth    string          `json:"claude_auth"`
+	ClaudeAccount string          `json:"claude_account"`
+	Load          *proto.Load     `json:"load,omitempty"` // live, in-memory
 	RunnerVersion string          `json:"runner_version"`
 	Model         string          `json:"model"`
 	LastSeen      int64           `json:"last_seen"`
@@ -287,13 +294,13 @@ func (n *Node) HasRole(r string) bool {
 	return false
 }
 
-const nodeCols = `id,name,hardware,caps,roles,max_conc,extra_caps,disabled_caps,override_roles,override_conc,paused,claude_path,claude_version,claude_auth,runner_version,model,last_seen,registered_at`
+const nodeCols = `id,name,hardware,caps,roles,max_conc,extra_caps,disabled_caps,override_roles,override_conc,paused,claude_path,claude_version,claude_auth,claude_account,runner_version,model,last_seen,registered_at`
 
 func scanNode(r interface{ Scan(...any) error }) (*Node, error) {
 	n := &Node{}
 	var hw, caps, roles, extra, disabled string
 	err := r.Scan(&n.ID, &n.Name, &hw, &caps, &roles, &n.ReportedConc, &extra, &disabled, &n.OverrideRoles, &n.OverrideConc, &n.Paused,
-		&n.ClaudePath, &n.ClaudeVersion, &n.ClaudeAuth, &n.RunnerVersion, &n.Model, &n.LastSeen, &n.RegisteredAt)
+		&n.ClaudePath, &n.ClaudeVersion, &n.ClaudeAuth, &n.ClaudeAccount, &n.RunnerVersion, &n.Model, &n.LastSeen, &n.RegisteredAt)
 	n.Hardware = json.RawMessage(hw)
 	n.Caps, n.ReportedRoles, n.ExtraCaps, n.DisabledCaps = parseStrs(caps), parseStrs(roles), parseStrs(extra), nz(parseStrs(disabled))
 	n.Roles = n.ReportedRoles

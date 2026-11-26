@@ -112,8 +112,16 @@ Auto-detected capabilities include:
    - `agent`: reviewer machines review.
    - `human`: you click **Approve & merge** in the issue.
    - `none`: work is merged as soon as the worker is done.
-6. **Project instructions** (Settings) are appended to every agent's system prompt. Put build/test commands and conventions there.
-7. **Repositories & mirrors** (Settings) — see below.
+6. **Questions.** When an agent needs a decision only a human can make, it calls `ask_human`:
+   - The question shows up on the **Questions** page (sidebar badge, tab title), in the project chat, and as a ❓ on the issue card.
+   - Answer with one of the suggested options or in your own words, or click **Dismiss** to let the agent decide.
+   - By default the agent waits for up to 10 minutes, and can keep waiting longer.
+   - If you answer later, the answer is injected into the running session. If that session has ended, the answer is added to the issue, and a blocked issue goes back to *To do*.
+7. **Talk to one agent.** 💬 on a live board card or agent tile, or the message box in the issue panel, injects a message straight into that agent's session.
+8. **Project instructions** (Settings) are appended to every agent's system prompt. Put build/test commands and conventions there.
+9. **Repositories & mirrors** (Settings) — see below.
+10. **Machines** shows each machine's Claude account and its live load, refreshed every 10 seconds: CPU, RAM, disk space over all local disks, and per-GPU utilisation and VRAM.
+11. **Subagents.** Every agent is told to parallelize independent work with subagents and to pick cheaper models where they suffice: haiku for searching and summarizing, sonnet for routine implementation, the main model for design and integration.
 
 ### Machines with several GPUs
 

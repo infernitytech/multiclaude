@@ -127,6 +127,7 @@ function route() {
     else view = projectView(slug, tab, url.searchParams);
   } else if (parts[0] === "runs" && parts[1]) view = runView(parts[1]);
   else if (parts[0] === "machines") view = machinesView();
+  else if (parts[0] === "questions") view = questionsView();
   else if (parts[0] === "account") view = accountView();
   else view = dashboardView();
   mount(view);
@@ -148,11 +149,14 @@ function renderSidebar() {
   const sb = $("#sidebar");
   sb.innerHTML = "";
   const online = S.overview.nodes.filter(n => n.online).length;
-  const busy = S.overview.nodes.reduce((a, n) => a + n.active.length, 0);
+  const busy = S.overview.nodes.filter(n => n.online && n.active.length).length; // machines, not sessions
+  const openQ = S.overview.open_questions || 0;
+  document.title = (openQ ? `(${openQ}) ` : "") + "MultiClaude";
   add(sb, [
     link("/", h("div", { class: "brand" }, h("div", { class: "logo", html: `<svg width="16" height="16" viewBox="0 0 32 32"><circle cx="10" cy="11" r="4" fill="white"/><circle cx="22" cy="11" r="4" fill="white"/><circle cx="16" cy="22" r="4" fill="white"/></svg>` }), "MultiClaude")),
     h("div", { class: "nav" },
       link("/", "Overview"),
+      link("/questions", "Questions", openQ ? h("span", { class: "count badge", title: "Agents are waiting for your answer" }, `${openQ} open`) : h("span", { class: "count" }, "")),
       link("/machines", "Machines", h("span", { class: "count" }, `${online} on · ${busy} busy`)),
       link("/account", "Users & account")),
     h("div", { class: "nav-section" }, "Projects"),
@@ -182,11 +186,38 @@ function connectEvents() {
   es.onmessage = e => {
     let ev;
     try { ev = JSON.parse(e.data); } catch { return; }
-    if (["nodes", "projects", "issues", "runs"].includes(ev.type)) refreshOverview();
+    if (["nodes", "projects", "issues", "runs", "questions"].includes(ev.type)) refreshOverview();
+    if (ev.type === "load") applyLoad(ev.data.node_id, ev.data.load);
     if (ev.type === "activity") applyActivity(ev);
     S.view && S.view.onEvent && S.view.onEvent(ev);
     S.drawer && S.drawer.onEvent && S.drawer.onEvent(ev);
   };
+}
+
+// ---------- talking to one running agent ----------
+function agentMessageBox(runId, onSent) {
+  const ta = h("textarea", { rows: 2, placeholder: "e.g. \"Use the existing auth middleware instead\" — Enter sends, Shift+Enter new line", style: { width: "100%" } });
+  const send = async () => {
+    const body = ta.value.trim();
+    if (!body) return;
+    ta.disabled = true;
+    try {
+      await api("POST", `/api/runs/${runId}/message`, { body });
+      ta.value = "";
+      toast("Sent — the agent sees it now");
+      onSent && onSent();
+    } finally { ta.disabled = false; }
+  };
+  ta.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+  return h("div", { class: "row", style: { gap: "8px", alignItems: "flex-end" } }, ta, h("button", { class: "btn primary small", onclick: send }, "Send"));
+}
+function messageAgentModal(runId, what, who) {
+  let closeFn;
+  const box = agentMessageBox(runId, () => closeFn && closeFn());
+  modal(`Message ${who || "the agent"}`, h("div", null, h("p", { class: "hint", style: { marginTop: 0 } }, `Working on ${what}. Your message is injected into its live session (like typing into its chat).`), box,
+    h("p", { class: "hint" }, link(`/runs/${runId}`, "Open the live view →"))),
+    close => { closeFn = close; return [h("button", { class: "btn", onclick: close }, "Close")]; });
+  setTimeout(() => box.querySelector("textarea").focus(), 0);
 }
 
 // ---------- modal ----------
@@ -381,8 +412,10 @@ function actText(a) { return a ? a.text : "starting…"; }
 function agentTile(r) {
   const a = ACT[r.id] || r.activity;
   return h("div", { class: "agent-tile", "data-run": r.id, onclick: () => go(`/runs/${r.id}`), title: "Watch this agent" },
-    h("div", { class: "row", style: { gap: "6px" } }, h("span", { class: "dot busy" }), h("b", null, r.node_name), h("span", { class: "mono hint" }, "/" + r.id.slice(0, 6)),
-      h("span", { class: "spacer" }), h("span", { class: "chip " + (r.kind === "review" ? "req" : r.kind === "chat" ? "accent" : "") }, r.kind)),
+    h("div", { class: "row", style: { gap: "6px" } }, h("span", { class: "dot busy" }), h("b", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 } }, r.node_name), h("span", { class: "mono hint" }, "/" + r.id.slice(0, 6)),
+      h("span", { class: "spacer" }),
+      h("button", { class: "icon-btn", title: "Message this agent", onclick: e => { e.stopPropagation(); messageAgentModal(r.id, r.issue_number ? `#${r.issue_number} ${r.issue_title}` : "a chat session", `${r.node_name}/${r.id.slice(0, 6)}`); } }, "💬"),
+      h("span", { class: "chip " + (r.kind === "review" ? "req" : r.kind === "chat" ? "accent" : "") }, r.kind)),
     h("div", { class: "agent-task" }, r.issue_number ? `#${r.issue_number} ${r.issue_title}` : "chat session"),
     h("div", { class: "agent-now", "data-act": r.id }, actText(a)),
     h("div", { class: "hint", "data-actmeta": r.id }, actMeta(r, a)));
@@ -442,7 +475,10 @@ function boardView(info) {
       h("div", { class: "row", style: { gap: "6px" } }, h("span", { class: "num" }, `#${i.number}`),
         i.attempts > 0 && i.status !== "done" && h("span", { class: "chip warn", title: "failed attempts" }, `↻${i.attempts}`),
         stuck && h("span", { class: "chip bad", title: `No machine assigned to this project has all of: ${i.requires.join(", ")} — nobody can pick this up` }, "⚠ no machine"),
-        h("span", { class: "spacer" }), i.run_id && h("span", { class: "dot busy", title: `${i.assignee} is on it` })),
+        i.open_questions ? h("span", { class: "chip warn click", title: "The agent asked a question — click to answer", onclick: e => { e.stopPropagation(); go("/questions"); } }, "❓ question") : null,
+        h("span", { class: "spacer" }),
+        agent && h("button", { class: "icon-btn", title: `Message ${agent.node_name}/${agent.id.slice(0, 6)} (injected into its session)`, onclick: e => { e.stopPropagation(); messageAgentModal(agent.id, `#${i.number} ${i.title}`, i.assignee); } }, "💬"),
+        i.run_id && h("span", { class: "dot busy", title: `${i.assignee} is on it` })),
       h("div", { class: "t" }, i.title),
       h("div", { class: "meta" },
         i.labels.map(l => h("span", { class: "chip" }, l)),
@@ -459,7 +495,7 @@ function boardView(info) {
     const body = h("div", { class: "col-body" }, list.map(card));
     const hidden = colData.total - list.length;
     let foot = null;
-    if (status === "done") foot = link(`/p/${slug}/archive${filter ? "?q=" + encodeURIComponent(filter) : ""}`, colData.total ? `Archive · all ${colData.total} completed →` : "Archive →");
+    if (status === "done") foot = link(`/p/${slug}/archive${filter ? "?q=" + encodeURIComponent(filter) : ""}`, hidden > 0 ? `Last ${list.length} shown · all ${colData.total} in the archive →` : "Archive →");
     else if (hidden > 0) foot = link(`/p/${slug}/list?status=${status}${filter ? "&q=" + encodeURIComponent(filter) : ""}`, `+ ${hidden} more — open in list →`);
     const col = h("div", { class: "col" },
       h("div", { class: "col-head" }, h("span", { class: "dot", style: { background: STATUS_COLOR[status] } }), name, h("span", { class: "n" }, colData.total)),
@@ -535,7 +571,7 @@ function boardView(info) {
     else if (!info.project.dispatch) add(noMachines, [h("span", { class: "chip warn" }, "Dispatch paused")]);
   }
   async function load() {
-    data = await api("GET", `/api/projects/${slug}/board?per=${PER}${filter ? "&q=" + encodeURIComponent(filter) : ""}`);
+    data = await api("GET", `/api/projects/${slug}/board?per=${PER}&done=20${filter ? "&q=" + encodeURIComponent(filter) : ""}`);
     data.agents.forEach(r => { if (r.activity && !ACT[r.id]) ACT[r.id] = r.activity; });
     issues = Object.values(data.columns).flatMap(c => c.items);
     render();
@@ -682,6 +718,8 @@ async function openIssue(slug, number, fromRoute) {
         h("div", { class: "k" }, "Depends on"), listInput("depends_on", "issue numbers, e.g. 3, 7"),
         h("div", { class: "k" }, "Branch"), h("div", { class: "mono hint" }, i.branch || `issue-${i.number} (when started)`),
         h("div", { class: "k" }, "Created"), h("div", { class: "hint" }, `${ago(i.created_at)} by ${i.created_by}`)),
+      i.open_questions ? h("div", { class: "card pad", style: { borderLeft: "3px solid var(--warn)", marginBottom: "12px" } }, `❓ The agent asked ${i.open_questions > 1 ? i.open_questions + " questions" : "a question"} about this issue. `, link("/questions", "Answer it →")) : null,
+      i.run_id ? h("div", { class: "card pad agent-msg-card" }, h("div", { class: "hint", style: { marginBottom: "6px" } }, `💬 Message ${i.assignee} — injected straight into its running session`), agentMessageBox(i.run_id)) : null,
       desc,
       i.runs?.length ? [h("div", { class: "section-title" }, "Agent runs"), runTable(i.runs.slice(0, 8), false)] : null,
       h("div", { class: "section-title" }, "Activity"),
@@ -757,7 +795,8 @@ function chatView(info) {
     return h("div", { class: "msg " + (human ? "human" : "agent") },
       h("div", { class: "who" }, h("b", null, human ? "You" : "🤖 " + m.author), to, h("span", null, ago(m.created_at)),
         m.target.startsWith("reply:") && link(`/runs/${m.target.slice(6)}`, "session")),
-      h("div", { class: "bubble md", html: md(m.body) }));
+      h("div", { class: "bubble md", html: md(m.body) }),
+      /^❓ Question Q\d+/.test(m.body) && h("div", { style: { marginTop: "4px" } }, link("/questions", "→ Answer on the Questions page")));
   }
   function append(m) {
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
@@ -1254,6 +1293,8 @@ function machinesView() {
         h("button", { class: "btn small", onclick: () => save({ paused: !n.paused }) }, n.paused ? "Resume" : "Pause")),
       h("div", { class: "kv" },
         h("div", { class: "k" }, "Claude"), h("div", null, n.claude_version || "?", " ", h("span", { class: "chip " + (authOk ? "ok" : "bad") }, n.claude_auth || "auth unknown")),
+        h("div", { class: "k" }, "Account"), h("div", null, n.claude_account || h("span", { class: "hint" }, n.online ? "unknown (update the runner)" : "unknown")),
+        h("div", { class: "k" }, "Load"), loadBlock(n),
         h("div", { class: "k" }, "CPU"), h("div", null, `${hw.cpu_model || "?"} · ${hw.cpu_cores} cores`),
         h("div", { class: "k" }, "Memory"), h("div", null, `${hw.memory_gb} GB · ${hw.disk_free_gb} GB disk free`),
         h("div", { class: "k" }, (hw.gpus || []).length > 1 ? `GPUs (${hw.gpus.length})` : "GPU"), h("div", null, (hw.gpus || []).length ? gpuList(n, hw.gpus, save) : h("span", { class: "hint" }, "none")),
@@ -1354,6 +1395,94 @@ function githubCard() {
 }
 
 // One line per GPU: which run holds it; click to reserve it for something else ("gpu#i" switched off).
+// ---------- machine load (live, every ~10 s) ----------
+function applyLoad(nodeId, load) {
+  const n = S.overview.nodes.find(x => x.id === nodeId);
+  if (n) n.load = load;
+  document.querySelectorAll(`[data-load="${CSS.escape(nodeId)}"]`).forEach(el => { el.replaceWith(loadBlock(n || { id: nodeId, load, hardware: {} })); });
+}
+function meter(label, pct, text, title) {
+  pct = Math.max(0, Math.min(100, pct || 0));
+  const lvl = pct >= 90 ? "bad" : pct >= 70 ? "warn" : "ok";
+  return h("div", { class: "meter", title: title || "" }, h("span", { class: "ml" }, label),
+    h("span", { class: "bar" }, h("span", { class: "fill " + lvl, style: { width: pct + "%" } })), h("span", { class: "mv" }, text));
+}
+const gb = v => v >= 1000 ? (v / 1000).toFixed(1) + " TB" : Math.round(v) + " GB";
+function loadBlock(n) {
+  const l = n.load;
+  if (!l || !n.online) return h("div", { "data-load": n.id, class: "hint" }, n.online ? "waiting for the first report… (needs runner ≥ this version)" : "—");
+  const gpus = (n.hardware && n.hardware.gpus) || [];
+  const seen = {};
+  const num = gpus.map((g, i) => { const idx = g.has_index ? g.index : (seen[g.vendor] || 0); seen[g.vendor] = (seen[g.vendor] || 0) + 1; return [g.vendor + ":" + idx, i]; });
+  const byKey = Object.fromEntries(num);
+  const pct = (a, b) => b ? 100 * a / b : 0;
+  return h("div", { "data-load": n.id, class: "meters" },
+    meter("CPU", l.cpu_pct, `${Math.round(l.cpu_pct)}% · load ${l.load1}`, "CPU utilisation over all cores · 1-minute load average"),
+    meter("RAM", pct(l.mem_used_gb, l.mem_total_gb), `${l.mem_used_gb} / ${l.mem_total_gb} GB`),
+    l.disk_total_gb ? meter("Disk", pct(l.disk_used_gb, l.disk_total_gb), `${gb(l.disk_used_gb)} / ${gb(l.disk_total_gb)}`, "All local disks together") : null,
+    (l.gpus || []).flatMap(g => {
+      const i = byKey[g.vendor + ":" + g.index] ?? g.index;
+      const lab = (l.gpus.length > 1 ? `GPU ${i}` : "GPU");
+      return [meter(lab, g.util_pct, `${Math.round(g.util_pct)}%`, (gpus[i] || {}).name || ""),
+        meter(l.gpus.length > 1 ? `VRAM ${i}` : "VRAM", pct(g.mem_used_mb, g.mem_total_mb), `${(g.mem_used_mb / 1024).toFixed(1)} / ${Math.round(g.mem_total_mb / 1024)} GB`)];
+    }),
+    h("div", { class: "hint", style: { fontSize: "11px" } }, "updated ", h("span", { "data-ago": l.ts }, ago(l.ts))));
+}
+
+// ---------- questions from agents ----------
+function questionsView() {
+  const content = h("div", { class: "content" });
+  const el = h("div", { style: { display: "contents" } },
+    h("div", { class: "topbar", style: { paddingBottom: "14px" } }, h("h1", null, "Questions"), h("span", { class: "sub" }, "Agents ask here when they need a human decision")), content);
+  const drafts = {};
+  async function render() {
+    if ([...content.querySelectorAll("textarea")].some(t => t === document.activeElement)) return;
+    const [open, recent] = await Promise.all([api("GET", "/api/questions"), api("GET", "/api/questions?status=recent")]);
+    content.innerHTML = "";
+    add(content, [
+      open.length ? open.map(qCard) : h("div", { class: "card empty" }, "No open questions. Agents ask with ask_human when they need a decision; they show up here, in the sidebar and in the project chat."),
+      recent.length ? [h("div", { class: "section-title" }, "Recently answered"), recent.map(doneCard)] : null,
+    ]);
+  }
+  function where(q) {
+    return [link(`/p/${q.project_slug}`, q.project_name), " · 🤖 ", q.agent,
+      q.issue_number ? [" · ", link(`/p/${q.project_slug}/i/${q.issue_number}`, `#${q.issue_number} ${q.issue_title}`)] : " · chat session",
+      " · ", ago(q.created_at)];
+  }
+  function qCard(q) {
+    const ta = h("textarea", { rows: 3, placeholder: "Your answer… (Ctrl+Enter to send)", style: { width: "100%" }, oninput: e => drafts[q.id] = e.target.value });
+    ta.value = drafts[q.id] || "";
+    const send = async (answer, dismiss) => {
+      const r = await api("POST", `/api/questions/${q.id}/answer`, dismiss ? { dismiss: true, answer } : { answer });
+      delete drafts[q.id];
+      toast(`Answer ${r.delivery}`);
+      render();
+    };
+    ta.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && ta.value.trim()) send(ta.value.trim()); });
+    const state = q.waiting ? h("span", { class: "chip warn" }, "⏳ agent is waiting") :
+      q.run_status === "running" ? h("span", { class: "chip" }, "agent continues — answer is delivered live") :
+      h("span", { class: "chip", title: "The session has ended" }, q.issue_number ? "session ended — answer goes to the issue" : "session ended — answer starts a chat session");
+    return h("div", { class: "card pad question" },
+      h("div", { class: "row wrap", style: { gap: "6px", marginBottom: "6px" } }, h("b", null, `Q${q.id}`), h("span", { class: "hint" }, where(q)), h("span", { class: "spacer" }), state,
+        q.run_status === "running" && link(`/runs/${q.run_id}`, "watch")),
+      h("div", { class: "md q-text", html: md(q.question) }),
+      q.context && h("details", null, h("summary", { class: "hint" }, "Context from the agent"), h("div", { class: "md hint", html: md(q.context) })),
+      q.options.length ? h("div", { class: "row wrap", style: { gap: "6px", margin: "8px 0" } }, q.options.map(o => h("button", { class: "btn small", onclick: () => send(o) }, o))) : null,
+      ta,
+      h("div", { class: "row", style: { gap: "8px", marginTop: "6px", justifyContent: "flex-end" } },
+        h("button", { class: "btn small ghost", title: "Tell the agent to decide itself", onclick: () => send(ta.value.trim(), true) }, "Dismiss — decide yourself"),
+        h("button", { class: "btn small primary", onclick: () => ta.value.trim() ? send(ta.value.trim()) : toast("Write an answer first", true) }, "Send answer")));
+  }
+  function doneCard(q) {
+    return h("div", { class: "card pad", style: { opacity: .8 } },
+      h("div", { class: "row wrap", style: { gap: "6px" } }, h("b", null, `Q${q.id}`), h("span", { class: "hint" }, where(q)), h("span", { class: "spacer" }),
+        h("span", { class: "chip " + (q.status === "answered" ? "ok" : "") }, q.status === "answered" ? `answered by ${q.answered_by}` : `dismissed by ${q.answered_by}`)),
+      h("div", { class: "md", html: md(q.question) }),
+      q.answer && h("div", { class: "md answer", html: md(q.answer) }));
+  }
+  return { el, load: render, onEvent: debounce(ev => { if (ev.type === "questions") render(); }, 300) };
+}
+
 function gpuList(n, gpus, save) {
   const holder = {};
   for (const r of n.active) for (const g of r.gpus || []) holder[g] = r;

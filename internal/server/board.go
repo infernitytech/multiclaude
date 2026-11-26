@@ -149,6 +149,12 @@ func (s *Server) apiBoard(w http.ResponseWriter, r *http.Request) {
 		}
 		cols[st] = boardColumn{items, total}
 	}
+	open := s.openQuestionsByIssue(p.ID)
+	for _, c := range cols {
+		for _, i := range c.Items {
+			i.OpenQuestions = open[i.ID]
+		}
+	}
 	writeJSON(w, map[string]any{"columns": cols, "agents": s.withActivity(s.projectAgents(p.ID))})
 }
 
@@ -235,6 +241,10 @@ func toolLine(name string, input map[string]any) string {
 		return "✔ completing work"
 	case "review_verdict":
 		return "⚖ review verdict: " + str("verdict")
+	case "ask_human":
+		return "❓ asking the humans: " + short(str("question"), 90) + " (waiting for an answer)"
+	case "wait_for_answer":
+		return "❓ waiting for a human answer"
 	case "block_issue":
 		return "🚧 blocking: " + short(str("reason"), 90)
 	}

@@ -3,6 +3,7 @@ package runner
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,6 +195,53 @@ func ClaudeAuth() string {
 		return "macOS keychain (assumed)"
 	}
 	return "not found — run `claude` once and log in"
+}
+
+// ClaudeAccount reads the logged-in account from Claude Code's config file.
+func ClaudeAccount() string {
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		return "API key"
+	}
+	home, _ := os.UserHomeDir()
+	paths := []string{filepath.Join(home, ".claude.json")}
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		paths = append([]string{filepath.Join(d, ".claude.json")}, paths...)
+	}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var cfg struct {
+			OAuthAccount *struct {
+				Email   string `json:"emailAddress"`
+				Name    string `json:"displayName"`
+				Org     string `json:"organizationName"`
+				Plan    string `json:"planDisplayName"`
+				Billing string `json:"billingType"`
+			} `json:"oauthAccount"`
+		}
+		if json.Unmarshal(b, &cfg) != nil || cfg.OAuthAccount == nil || cfg.OAuthAccount.Email == "" {
+			continue
+		}
+		a := cfg.OAuthAccount
+		s := a.Email
+		if a.Name != "" {
+			s = a.Name + " <" + a.Email + ">"
+		}
+		var extra []string
+		if a.Plan != "" {
+			extra = append(extra, a.Plan)
+		}
+		if a.Org != "" && !strings.Contains(a.Org, a.Email) {
+			extra = append(extra, a.Org)
+		}
+		if len(extra) > 0 {
+			s += " · " + strings.Join(extra, " · ")
+		}
+		return s
+	}
+	return ""
 }
 
 // amdVRAM returns total VRAM in MB per rocm-smi device number.

@@ -245,6 +245,8 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/projects/{slug}/repo/blob", s.apiBlob)
 	m.HandleFunc("GET /api/projects/{slug}/repo/log", s.apiLog)
 	m.HandleFunc("GET /api/projects/{slug}/repo/commit", s.apiCommit)
+	m.HandleFunc("GET /api/questions", s.apiQuestions)
+	m.HandleFunc("POST /api/questions/{id}/answer", s.apiAnswerQuestion)
 	m.HandleFunc("GET /api/nodes", s.apiNodes)
 	m.HandleFunc("PATCH /api/nodes/{id}", s.apiUpdateNode)
 	m.HandleFunc("DELETE /api/nodes/{id}", s.apiDeleteNode)
@@ -261,6 +263,7 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/runner/runs/{id}/events", s.runnerEvents)
 	m.HandleFunc("POST /api/runner/runs/{id}/finish", s.runnerFinish)
 	m.HandleFunc("POST /api/agent/call", s.agentCall)
+	m.HandleFunc("POST /api/runner/load", s.runnerLoad)
 
 	// Runner distribution
 	m.HandleFunc("GET /install.sh", s.installScript)

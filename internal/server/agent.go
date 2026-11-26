@@ -21,7 +21,19 @@ func (s *Server) agentCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, proto.AgentResult{Text: "unknown run for this machine", IsError: true})
 		return
 	}
-	text, err := s.dispatchTool(c)
+	var text string
+	var err error
+	if c.Tool == "ask_human" || c.Tool == "wait_for_answer" {
+		run, _ := s.runByID(c.RunID)
+		var args map[string]any
+		json.Unmarshal(c.Args, &args)
+		if args == nil {
+			args = map[string]any{}
+		}
+		text, err = s.askHuman(r.Context(), maxWait(r), run, c.Tool, args)
+	} else {
+		text, err = s.dispatchTool(c)
+	}
 	if err != nil {
 		writeJSON(w, proto.AgentResult{Text: err.Error(), IsError: true})
 		return
@@ -270,6 +282,7 @@ func (s *Server) listNodes() ([]*Node, error) {
 	rows.Close()
 	for _, n := range nodes {
 		n.Projects = s.nodeProjects(n.ID)
+		n.Load = loadOf(n.ID)
 		n.Active = []Run{}
 		rr, err := s.db.Query(runSelect+`WHERE r.node_id=? AND r.status='running' ORDER BY r.started_at`, n.ID)
 		if err == nil {

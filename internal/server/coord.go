@@ -45,6 +45,7 @@ func (s *Server) node(id string) (*Node, error) {
 		return nil, err
 	}
 	n.Projects = s.nodeProjects(id)
+	n.Load = loadOf(id)
 	return n, nil
 }
 
@@ -123,13 +124,13 @@ func (s *Server) runnerRegister(w http.ResponseWriter, r *http.Request) {
 		req.Roles = []string{"worker", "reviewer"}
 	}
 	t := now()
-	_, err = s.db.Exec(`INSERT INTO nodes(id,name,hardware,caps,roles,max_conc,claude_path,claude_version,claude_auth,runner_version,last_seen,registered_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err = s.db.Exec(`INSERT INTO nodes(id,name,hardware,caps,roles,max_conc,claude_path,claude_version,claude_auth,claude_account,runner_version,last_seen,registered_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, hardware=excluded.hardware, caps=excluded.caps, roles=excluded.roles,
 		max_conc=excluded.max_conc, claude_path=excluded.claude_path, claude_version=excluded.claude_version, claude_auth=excluded.claude_auth,
-		runner_version=excluded.runner_version, last_seen=excluded.last_seen`,
+		claude_account=excluded.claude_account, runner_version=excluded.runner_version, last_seen=excluded.last_seen`,
 		req.NodeID, req.Name, jsonStr(req.Hardware), jsonStr(req.Capabilities), jsonStr(req.Roles), req.MaxConcurrency,
-		req.ClaudePath, req.ClaudeVersion, req.ClaudeAuth, req.RunnerVersion, t, t)
+		req.ClaudePath, req.ClaudeVersion, req.ClaudeAuth, req.ClaudeAccount, req.RunnerVersion, t, t)
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
