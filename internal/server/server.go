@@ -488,20 +488,27 @@ func (s *Server) reaper() {
 			continue
 		}
 		pruneAgentCalls(s)
-		cutoff := now() - 90_000
-		rows, err := s.db.Query(`SELECT r.id FROM runs r JOIN nodes n ON n.id=r.node_id WHERE r.status='running' AND n.last_seen < ?`, cutoff)
-		if err != nil {
-			continue
-		}
-		var ids []string
-		for rows.Next() {
-			var id string
-			rows.Scan(&id)
-			ids = append(ids, id)
-		}
-		rows.Close()
-		for _, id := range ids {
-			s.finishRun(id, proto.RunFinish{Status: "lost", Error: "machine went offline"})
-		}
+		s.reapStale(now() - 90_000)
+	}
+}
+
+// reapStale ends the runs of machines not seen since cutoff, or gone entirely.
+func (s *Server) reapStale(cutoff int64) {
+	// Includes runs whose machine row is gone (removed, or replaced by a
+	// re-enrollment): nothing would ever end them, and they would hold
+	// their issue forever (an issue waits until no session of it runs).
+	rows, err := s.db.Query(`SELECT r.id FROM runs r LEFT JOIN nodes n ON n.id=r.node_id WHERE r.status='running' AND (n.id IS NULL OR n.last_seen < ?)`, cutoff)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	for _, id := range ids {
+		s.finishRun(id, proto.RunFinish{Status: "lost", Error: "machine went offline or was removed"})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // projectMachines returns the machines assigned to a project.
@@ -244,10 +245,21 @@ func (s *Server) waitReason(p *Project, i *Issue, machines []*Node, running map[
 	if i.Status == "todo" && !s.depsDone(i) {
 		return "waiting for its dependencies to be done"
 	}
-	var prev int
-	s.db.QueryRow(`SELECT COUNT(*) FROM runs WHERE issue_id=? AND status='running'`, i.ID).Scan(&prev)
-	if prev > 0 {
-		return "waiting for its previous session to stop"
+	var prevID, prevKind, prevNode string
+	var prevStart, prevSeen int64
+	var prevKnown bool
+	if s.db.QueryRow(`SELECT r.id, r.kind, r.started_at, COALESCE(n.name,''), COALESCE(n.last_seen,0), n.id IS NOT NULL
+		FROM runs r LEFT JOIN nodes n ON n.id=r.node_id WHERE r.issue_id=? AND r.status='running' ORDER BY r.started_at LIMIT 1`, i.ID).
+		Scan(&prevID, &prevKind, &prevStart, &prevNode, &prevSeen, &prevKnown) == nil {
+		where := "on a machine that no longer exists"
+		if prevKnown {
+			where = "on " + prevNode
+			if now()-prevSeen > 70_000 {
+				where += fmt.Sprintf(", offline for %s", (time.Duration(now()-prevSeen) * time.Millisecond).Round(time.Minute))
+			}
+		}
+		return fmt.Sprintf("waiting for its previous %s session %s (%s, started %s ago) to stop — it is cancelled and released automatically",
+			prevKind, shortID(prevID), where, (time.Duration(now()-prevStart) * time.Millisecond).Round(time.Minute))
 	}
 	var withRole, capable, online, unpaused, notDraining, free []*Node
 	for _, n := range machines {
