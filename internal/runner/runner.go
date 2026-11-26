@@ -47,11 +47,13 @@ type Runner struct {
 	http   *http.Client
 	self   string // path of this executable (used as MCP server command)
 
-	mu       sync.Mutex
-	sessions map[string]*session
-	wsInUse  map[string]bool
+	mu        sync.Mutex
+	sessions  map[string]*session
+	finishing map[string]bool // ended runs whose finish report has not reached the server yet
+	wsInUse   map[string]bool
 
-	updateTried map[string]bool // server versions a self-update was attempted for
+	updateTried   map[string]time.Time // server versions a self-update was attempted for
+	pendingUpdate string               // newer server version: take no new work, update when idle
 }
 
 func defaultWorkDir(dir string) string {
@@ -101,7 +103,7 @@ func New(cfg Config) (*Runner, error) {
 		return nil, err
 	}
 	r := &Runner{cfg: cfg, self: self, http: &http.Client{Timeout: 60 * time.Second},
-		sessions: map[string]*session{}, wsInUse: map[string]bool{}, updateTried: map[string]bool{}}
+		sessions: map[string]*session{}, finishing: map[string]bool{}, wsInUse: map[string]bool{}, updateTried: map[string]time.Time{}}
 	if b, err := os.ReadFile(filepath.Join(cfg.WorkDir, "node-id")); err == nil {
 		r.nodeID = strings.TrimSpace(string(b)) // pre-auth versions
 	}
@@ -248,13 +250,17 @@ func (r *Runner) pollLoop(ctx context.Context) error {
 	fails := 0
 	for ctx.Err() == nil {
 		r.mu.Lock()
-		active := make([]string, 0, len(r.sessions))
+		active := make([]string, 0, len(r.sessions)+len(r.finishing))
 		for id := range r.sessions {
+			active = append(active, id)
+		}
+		for id := range r.finishing { // still ours until the server has its result
 			active = append(active, id)
 		}
 		r.mu.Unlock()
 		var resp proto.PollResponse
-		err := r.postCtx(ctx, "/api/runner/poll", proto.PollRequest{NodeID: r.nodeID, FreeSlots: r.cfg.Concurrency - len(active), ActiveRuns: active}, &resp)
+		err := r.postCtx(ctx, "/api/runner/poll", proto.PollRequest{NodeID: r.nodeID, FreeSlots: r.cfg.Concurrency - len(active), ActiveRuns: active, Draining: r.pendingUpdate,
+			Version: proto.Version, AutoUpdate: r.canSelfUpdate()}, &resp)
 		if err != nil {
 			var he *httpError
 			if errors.As(err, &he) && (he.code == 404 || he.code == 401) {
@@ -264,19 +270,24 @@ func (r *Runner) pollLoop(ctx context.Context) error {
 				return nil
 			}
 			fails++
-			if fails%10 == 1 {
-				log.Printf("poll error: %v", err)
+			if fails == 1 || fails%20 == 0 {
+				log.Printf("server unreachable (%v); running sessions continue, retrying every 3s", err)
 			}
-			time.Sleep(3 * time.Second)
+			select { // keep retrying for as long as it takes (e.g. while the server is updated)
+			case <-ctx.Done():
+				return nil
+			case <-time.After(3 * time.Second):
+			}
 			continue
+		}
+		if fails > 0 {
+			log.Printf("reconnected to the server after %d failed polls", fails)
 		}
 		fails = 0
 		for _, c := range resp.Commands {
 			r.handle(c)
 		}
-		if len(resp.Commands) == 0 {
-			r.maybeSelfUpdate(resp.ServerVersion)
-		}
+		r.maybeSelfUpdate(resp.ServerVersion)
 	}
 	return nil
 }
@@ -295,13 +306,12 @@ func (r *Runner) handle(c proto.Command) {
 			fin := s.run()
 			r.mu.Lock()
 			delete(r.sessions, s.a.RunID)
+			r.finishing[s.a.RunID] = true
 			r.mu.Unlock()
-			for i := 0; i < 20; i++ {
-				if err := r.post("/api/runner/runs/"+s.a.RunID+"/finish", fin, nil); err == nil {
-					break
-				}
-				time.Sleep(3 * time.Second)
-			}
+			r.reportFinish(s.a.RunID, fin)
+			r.mu.Lock()
+			delete(r.finishing, s.a.RunID)
+			r.mu.Unlock()
 		}()
 	case "message":
 		r.mu.Lock()
@@ -317,6 +327,27 @@ func (r *Runner) handle(c proto.Command) {
 		if s != nil {
 			s.cancel()
 		}
+	}
+}
+
+// reportFinish delivers a run's result, retrying for as long as the server is
+// unreachable (an update or restart must not turn finished work into a failure).
+func (r *Runner) reportFinish(runID string, fin proto.RunFinish) {
+	wait := 2 * time.Second
+	for i := 0; ; i++ {
+		err := r.post("/api/runner/runs/"+runID+"/finish", fin, nil)
+		var he *httpError
+		if err == nil || (errors.As(err, &he) && he.code >= 400 && he.code < 500 && he.code != 408 && he.code != 429) {
+			if err != nil {
+				log.Printf("[%s] server rejected the finish report: %v", runID, err)
+			}
+			return
+		}
+		if i == 0 || i%10 == 0 {
+			log.Printf("[%s] finish report not delivered yet (%v); retrying", runID, err)
+		}
+		time.Sleep(wait)
+		wait = min(wait*2, 30*time.Second)
 	}
 }
 

@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"errors"
-	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -27,9 +26,12 @@ func (r *Runner) loadLoop(ctx context.Context) {
 		l := sampleLoad(&cpu)
 		err := r.postCtx(ctx, "/api/runner/load", l, nil)
 		var he *httpError
-		if errors.As(err, &he) && he.code == 404 {
-			log.Printf("server does not accept load reports (older version); stopping them")
-			return
+		if errors.As(err, &he) && he.code == 404 { // older server: try again much later
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Minute):
+			}
 		}
 	}
 }

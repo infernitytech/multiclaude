@@ -118,10 +118,23 @@ Already-running machines from before auth existed must be enrolled once. Re-run 
 The UI shows "⬆ vX.Y.Z available" in the sidebar when a newer release exists.
 
 1. Optional but cheap: take a snapshot of the dataset (*Datasets → tank/apps/multiclaude → Create Snapshot*). That's your rollback for the data.
-2. *Apps → multiclaude → ⋮ → Pull Image*, or *Edit → Save* without changes. With `pull_policy: always` the new image is pulled and the container recreated. Running agents are interrupted; their issues go back to the queue and are picked up again.
+2. *Apps → multiclaude → ⋮ → Pull Image*, or *Edit → Save* without changes. With `pull_policy: always` the new image is pulled and the container recreated.
 3. The database migrates itself on start. Check *Logs* for `MultiClaude server vX.Y.Z`.
 
-**Runners update themselves.** Every runner compares its version with the server's. When they differ and it's idle, it downloads the matching binary from the server, checks it, replaces itself and restarts. Nothing to do on the machines. To opt out on a machine, set `MC_NO_SELF_UPDATE=1` in its service environment.
+**Agents keep working through the downtime.** Claude sessions run on the machines, not on the server:
+- Runners keep retrying every few seconds, and the web UI shows "Server unreachable — reconnecting…".
+- Meanwhile the runners hold on to finish reports, the live log and git pushes and send them once the server is back.
+- Agents' board/chat tool calls wait for the server for up to 15 minutes, and are never carried out twice.
+- An agent waiting for your answer to a question keeps waiting.
+- For two minutes after a restart the server doesn't treat any machine as gone, so running sessions aren't released by mistake.
+- The web UI reconnects by itself and reloads when the server version changed.
+
+**Runners update themselves.** Every runner compares its version with the server's. When they differ:
+1. It takes no new work. Its machine card shows "updating to vX after current work".
+2. It lets the running sessions finish.
+3. It downloads the matching binary from the server, checks it, replaces itself and restarts.
+
+Nothing to do on the machines. If an update fails, the runner keeps working and tries again 15 minutes later. To opt out on a machine, set `MC_NO_SELF_UPDATE=1` in its service environment.
 
 **Rollback**: change the tag to the previous version (e.g. `:0.1.0`), save, and roll back the dataset snapshot if the newer version already migrated the database.
 

@@ -80,6 +80,13 @@ type PollRequest struct {
 	NodeID     string   `json:"node_id"`
 	FreeSlots  int      `json:"free_slots"`
 	ActiveRuns []string `json:"active_runs"`
+	// Draining is set while the runner waits for its sessions to end before
+	// updating itself to this version; the server sends it no new work.
+	Draining string `json:"draining,omitempty"`
+	// Version and AutoUpdate let the server hold back new work from a runner
+	// that is about to update itself to the server's version.
+	Version    string `json:"version,omitempty"`
+	AutoUpdate bool   `json:"auto_update,omitempty"`
 }
 
 // Command is something the server asks a runner to do.

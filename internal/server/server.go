@@ -47,11 +47,10 @@ type Server struct {
 	db  *sql.DB
 	hub *hub
 
-	mu      sync.Mutex
-	queues  map[string][]proto.Command
-	notify  map[string]chan struct{}
-	workCh  chan struct{} // closed & replaced whenever new work may be claimable
-	replies map[string]int
+	mu     sync.Mutex
+	queues map[string][]proto.Command
+	notify map[string]chan struct{}
+	workCh chan struct{} // closed & replaced whenever new work may be claimable
 
 	internalToken string // lets the server talk to its own git endpoint
 }
@@ -406,8 +405,15 @@ func (s *Server) onPush(key string) {
 
 // reaper releases work held by nodes that disappeared.
 func (s *Server) reaper() {
+	started := now()
 	t := time.NewTicker(15 * time.Second)
 	for range t.C {
+		// Right after a restart every machine looks stale (last_seen is from
+		// before the downtime): give the runners time to reconnect first.
+		if now()-started < 120_000 {
+			continue
+		}
+		pruneAgentCalls(s)
 		cutoff := now() - 90_000
 		rows, err := s.db.Query(`SELECT r.id FROM runs r JOIN nodes n ON n.id=r.node_id WHERE r.status='running' AND n.last_seen < ?`, cutoff)
 		if err != nil {

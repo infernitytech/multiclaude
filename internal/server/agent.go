@@ -21,6 +21,16 @@ func (s *Server) agentCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, proto.AgentResult{Text: "unknown run for this machine", IsError: true})
 		return
 	}
+	// A retry of a call the server already carried out (the runner retries
+	// while the server restarts) gets the stored result instead of running twice.
+	callID := r.Header.Get("X-MC-Call-ID")
+	if callID != "" {
+		var res proto.AgentResult
+		if s.db.QueryRow(`SELECT text, is_error FROM agent_calls WHERE id=?`, callID).Scan(&res.Text, &res.IsError) == nil {
+			writeJSON(w, res)
+			return
+		}
+	}
 	var text string
 	var err error
 	if c.Tool == "ask_human" || c.Tool == "wait_for_answer" {
@@ -30,15 +40,38 @@ func (s *Server) agentCall(w http.ResponseWriter, r *http.Request) {
 		if args == nil {
 			args = map[string]any{}
 		}
-		text, err = s.askHuman(r.Context(), maxWait(r), run, c.Tool, args)
+		text, err = s.askHuman(r.Context(), maxWait(r), run, c.Tool, args, callID)
 	} else {
 		text, err = s.dispatchTool(c)
 	}
+	res := proto.AgentResult{Text: text}
 	if err != nil {
-		writeJSON(w, proto.AgentResult{Text: err.Error(), IsError: true})
+		res = proto.AgentResult{Text: err.Error(), IsError: true}
+	}
+	if callID != "" && r.Context().Err() == nil {
+		s.db.Exec(`INSERT OR IGNORE INTO agent_calls(id, text, is_error, created_at) VALUES(?,?,?,?)`, callID, res.Text, res.IsError, now())
+	}
+	writeJSON(w, res)
+}
+
+const agentCallSchema = `
+CREATE TABLE IF NOT EXISTS agent_calls(
+  id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  is_error INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+`
+
+var lastPrune time.Time
+
+// pruneAgentCalls forgets results of tool calls older than a day.
+func pruneAgentCalls(s *Server) {
+	if time.Since(lastPrune) < time.Hour {
 		return
 	}
-	writeJSON(w, proto.AgentResult{Text: text})
+	lastPrune = time.Now()
+	s.db.Exec(`DELETE FROM agent_calls WHERE created_at < ?`, now()-86_400_000)
 }
 
 func (s *Server) dispatchTool(c proto.AgentCall) (string, error) {
@@ -283,6 +316,7 @@ func (s *Server) listNodes() ([]*Node, error) {
 	for _, n := range nodes {
 		n.Projects = s.nodeProjects(n.ID)
 		n.Load = loadOf(n.ID)
+		n.UpdatingTo = drainingTo(n.ID)
 		n.Active = []Run{}
 		rr, err := s.db.Query(runSelect+`WHERE r.node_id=? AND r.status='running' ORDER BY r.started_at`, n.ID)
 		if err == nil {

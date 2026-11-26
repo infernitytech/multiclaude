@@ -180,9 +180,31 @@ function renderSidebar() {
 }
 
 // ---------- events (SSE) ----------
+// Survives server restarts/updates: shows a banner while the server is away,
+// reconnects, refreshes everything, and reloads the page if the server version changed.
+let lostSince = 0;
 function connectEvents() {
   const es = new EventSource("/api/events");
   const refreshOverview = debounce(loadOverview, 300);
+  const banner = () => $("#conn-banner") || document.body.appendChild(h("div", { id: "conn-banner" }));
+  es.onopen = async () => {
+    if (!lostSince) return;
+    lostSince = 0;
+    $("#conn-banner")?.remove();
+    const before = S.overview.version;
+    try { await loadOverview(); } catch { return; }
+    if (before && S.overview.version && before !== S.overview.version) { location.reload(); return; }
+    toast("Reconnected");
+    S.view && S.view.load && S.view.load();
+  };
+  es.onerror = () => {
+    if (!lostSince) lostSince = Date.now();
+    const b = banner();
+    b.textContent = "⚠ Server unreachable (restarting or updating?) — reconnecting… Agents keep working and report back when it's up.";
+    if (es.readyState === EventSource.CLOSED) { // e.g. a proxy answered 502: the browser won't retry on its own
+      setTimeout(connectEvents, 3000);
+    }
+  };
   es.onmessage = e => {
     let ev;
     try { ev = JSON.parse(e.data); } catch { return; }
@@ -1288,6 +1310,7 @@ function machinesView() {
     return h("div", { class: "card pad machine" },
       h("div", { class: "hdr" }, h("span", { class: "dot " + (n.online ? (n.active.length ? "busy" : "on") : "") }), h("h3", null, n.name),
         h("span", { class: "hint" }, n.online ? (n.active.length ? `${n.active.length}/${n.max_conc} busy` : "idle") : `offline · seen ${ago(n.last_seen)}`),
+        n.updating_to && h("span", { class: "chip warn", title: "The runner takes no new work and updates itself as soon as its running sessions are done" }, `updating to ${n.updating_to} after current work`),
         h("span", { class: "spacer" }),
         n.paused && h("span", { class: "chip warn" }, "paused"),
         h("button", { class: "btn small", onclick: () => save({ paused: !n.paused }) }, n.paused ? "Resume" : "Pause")),

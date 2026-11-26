@@ -46,6 +46,7 @@ func (s *Server) node(id string) (*Node, error) {
 	}
 	n.Projects = s.nodeProjects(id)
 	n.Load = loadOf(id)
+	n.UpdatingTo = drainingTo(id)
 	return n, nil
 }
 
@@ -166,6 +167,16 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.NodeID = nodeFrom(r) // a machine can only poll for itself
+	// A runner on another version that updates itself gets no new work: it
+	// finishes its sessions, then restarts as the server's version.
+	if req.Draining == "" && req.AutoUpdate && req.Version != "" && req.Version != proto.Version && proto.Version != "dev" {
+		req.Draining = proto.Version
+		setDraining(req.NodeID, req.Draining)
+		s.touch(req.NodeID)
+		writeJSON(w, proto.PollResponse{Commands: nzc(s.drain(req.NodeID)), ServerVersion: proto.Version})
+		return
+	}
+	setDraining(req.NodeID, req.Draining)
 	n, err := s.node(req.NodeID)
 	if err != nil {
 		httpErr(w, 404, "unknown node, re-register")
@@ -211,7 +222,7 @@ func (s *Server) runnerPoll(w http.ResponseWriter, r *http.Request) {
 	for {
 		cmds := s.drain(n.ID)
 		if n, err = s.node(req.NodeID); err == nil {
-			if free := n.MaxConc - s.runningCount(n.ID); free > 0 && !n.Paused {
+			if free := n.MaxConc - s.runningCount(n.ID); free > 0 && !n.Paused && req.Draining == "" {
 				cmds = append(cmds, s.claimWork(n, free)...)
 			}
 		}
@@ -295,23 +306,18 @@ func (s *Server) runnerEvents(w http.ResponseWriter, r *http.Request) {
 
 // pending chat replies per run: each human message injected into a run
 // expects one "result" which is mirrored back into the project chat.
+// Stored in the database so replies survive a server restart.
 func (s *Server) expectReply(runID string) {
-	s.mu.Lock()
-	if s.replies == nil {
-		s.replies = map[string]int{}
-	}
-	s.replies[runID]++
-	s.mu.Unlock()
+	s.db.Exec(`UPDATE runs SET pending_replies=pending_replies+1 WHERE id=?`, runID)
 }
 
 func (s *Server) takeReply(runID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.replies[runID] > 0 {
-		s.replies[runID]--
-		return true
+	res, err := s.db.Exec(`UPDATE runs SET pending_replies=pending_replies-1 WHERE id=? AND pending_replies>0`, runID)
+	if err != nil {
+		return false
 	}
-	return false
+	n, _ := res.RowsAffected()
+	return n > 0
 }
 
 func (s *Server) runnerFinish(w http.ResponseWriter, r *http.Request) {
@@ -517,7 +523,7 @@ func (s *Server) deliverChat(p *Project, targets []*Node, author, body string) s
 				s.enqueue(n.ID, proto.Command{Type: "message", RunID: id, Message: msg})
 			}
 			notes = append(notes, fmt.Sprintf("%s: injected into %d running session(s)", n.Name, len(runs)))
-		} else if s.runningCount(n.ID) < n.MaxConc {
+		} else if s.runningCount(n.ID) < n.MaxConc && drainingTo(n.ID) == "" {
 			s.startChatRun(p, n, author, body)
 			notes = append(notes, n.Name+": started a chat session")
 		} else {
@@ -545,9 +551,6 @@ func (s *Server) finishRun(id string, fin proto.RunFinish) {
 	s.db.Exec(`UPDATE runs SET status=?, ended_at=?, session_id=CASE WHEN ?<>'' THEN ? ELSE session_id END, result=?, error=? WHERE id=?`,
 		fin.Status, now(), fin.SessionID, fin.SessionID, fin.Result, fin.Error, id)
 	defer func() {
-		s.mu.Lock()
-		delete(s.replies, id)
-		s.mu.Unlock()
 		s.emit(event{Type: "runs", ProjectID: run.ProjectID})
 		s.emit(event{Type: "nodes"})
 		s.issueChanged(run.ProjectID)
@@ -721,3 +724,10 @@ func (s *Server) cancelIssueRun(issue *Issue) {
 }
 
 var _ = sql.ErrNoRows
+
+func nzc(c []proto.Command) []proto.Command {
+	if c == nil {
+		return []proto.Command{}
+	}
+	return c
+}

@@ -163,13 +163,17 @@ func maxWait(r *http.Request) time.Duration {
 // ---- agent tools ------------------------------------------------------------------
 
 // askHuman implements ask_human and wait_for_answer.
-func (s *Server) askHuman(ctx context.Context, limit time.Duration, run *Run, tool string, args map[string]any) (string, error) {
+func (s *Server) askHuman(ctx context.Context, limit time.Duration, run *Run, tool string, args map[string]any, callID string) (string, error) {
 	waitMin := 10.0
 	if v, ok := args["wait_minutes"].(float64); ok && v >= 0 {
 		waitMin = v
 	}
 	var id int64
-	if tool == "ask_human" {
+	if tool == "ask_human" && callID != "" {
+		// The runner retried this call (e.g. the server restarted while the agent waited): keep waiting on the same question.
+		s.db.QueryRow(`SELECT id FROM questions WHERE call_id=?`, callID).Scan(&id)
+	}
+	if tool == "ask_human" && id == 0 {
 		text := strings.TrimSpace(fmt.Sprint(args["question"]))
 		if args["question"] == nil || text == "" {
 			return "", fmt.Errorf("question is required")
@@ -183,8 +187,8 @@ func (s *Server) askHuman(ctx context.Context, limit time.Duration, run *Run, to
 			}
 		}
 		ctxText, _ := args["context"].(string)
-		res, err := s.db.Exec(`INSERT INTO questions(project_id,run_id,issue_id,node_id,agent,question,context,options,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-			run.ProjectID, run.ID, run.IssueID, run.NodeID, run.handle(), text, strings.TrimSpace(ctxText), jsonStr(nz(opts)), now())
+		res, err := s.db.Exec(`INSERT INTO questions(project_id,run_id,issue_id,node_id,agent,question,context,options,created_at,call_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			run.ProjectID, run.ID, run.IssueID, run.NodeID, run.handle(), text, strings.TrimSpace(ctxText), jsonStr(nz(opts)), now(), callID)
 		if err != nil {
 			return "", err
 		}
@@ -199,7 +203,7 @@ func (s *Server) askHuman(ctx context.Context, limit time.Duration, run *Run, to
 		}
 		s.postMessage(run.ProjectID, run.handle(), "", fmt.Sprintf("❓ Question Q%d%s: %s\n\nAnswer it on the Questions page.", id, where, text))
 		s.emit(event{Type: "questions"})
-	} else {
+	} else if tool == "wait_for_answer" {
 		v, _ := args["id"].(float64)
 		id = int64(v)
 		q, err := s.question(id)

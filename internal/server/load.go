@@ -53,3 +53,22 @@ func (s *Server) runnerLoad(w http.ResponseWriter, r *http.Request) {
 	s.emit(event{Type: "load", Data: map[string]any{"node_id": id, "load": l}})
 	w.WriteHeader(204)
 }
+
+// Draining runners: they wait for their sessions to end before updating.
+var draining = map[string]string{} // node id → version (guarded by loadMu)
+
+func setDraining(nodeID, version string) {
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	if version == "" {
+		delete(draining, nodeID)
+	} else {
+		draining[nodeID] = version
+	}
+}
+
+func drainingTo(nodeID string) string {
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	return draining[nodeID]
+}

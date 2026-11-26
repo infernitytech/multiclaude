@@ -15,25 +15,49 @@ import (
 	"multiclaude/internal/proto"
 )
 
-// maybeSelfUpdate replaces this binary with the server's runner build when the
-// versions differ and no session is running, then restarts in place. Runners
-// thereby follow server upgrades without anyone touching the machines.
-// Disable with MC_NO_SELF_UPDATE=1. Dev builds never update.
+// maybeSelfUpdate follows server upgrades: when the server runs another
+// version, the runner stops taking new work ("draining"), lets the running
+// sessions finish, then replaces this binary with the server's build and
+// restarts in place. Disable with MC_NO_SELF_UPDATE=1. Dev builds never update.
 func (r *Runner) maybeSelfUpdate(serverVersion string) {
 	if serverVersion == "" || serverVersion == proto.Version || serverVersion == "dev" || proto.Version == "dev" ||
-		os.Getenv("MC_NO_SELF_UPDATE") != "" || r.updateTried[serverVersion] {
+		os.Getenv("MC_NO_SELF_UPDATE") != "" {
+		r.pendingUpdate = ""
 		return
 	}
+	if t, ok := r.updateTried[serverVersion]; ok && time.Since(t) < 15*time.Minute {
+		return // last attempt failed; work normally and retry later
+	}
 	r.mu.Lock()
-	busy := len(r.sessions) > 0
+	busy := len(r.sessions) + len(r.finishing)
 	r.mu.Unlock()
-	if busy {
-		return // try again after the running sessions are done
+	if busy > 0 {
+		if r.pendingUpdate != serverVersion {
+			log.Printf("server runs %s (this runner %s): taking no new work, updating once the %d running session(s) are done", serverVersion, proto.Version, busy)
+		}
+		r.pendingUpdate = serverVersion
+		return
 	}
-	r.updateTried[serverVersion] = true
+	r.updateTried[serverVersion] = time.Now()
+	r.pendingUpdate = ""
 	if err := r.selfUpdate(serverVersion); err != nil {
-		log.Printf("self-update to %s failed: %v (continuing with %s)", serverVersion, err, proto.Version)
+		log.Printf("self-update to %s failed: %v (continuing with %s, retrying in 15 min)", serverVersion, err, proto.Version)
 	}
+}
+
+// canSelfUpdate: this runner will update itself to the server's version (so
+// the server should send it no new work until it has). False after a failed
+// attempt, so a runner that cannot update keeps working.
+func (r *Runner) canSelfUpdate() bool {
+	if proto.Version == "dev" || os.Getenv("MC_NO_SELF_UPDATE") != "" {
+		return false
+	}
+	for _, t := range r.updateTried {
+		if time.Since(t) < 15*time.Minute {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Runner) selfUpdate(want string) error {

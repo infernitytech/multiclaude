@@ -32,7 +32,7 @@ The server is a single container. It needs one persistent volume, mounted at `/d
 
 **Install**: create a dataset, e.g. `/mnt/tank/apps/multiclaude`, owned by the `apps` user (568). Then go to *Apps → Discover Apps → ⋮ → Install via YAML* and paste [`deploy/docker-compose.yml`](deploy/docker-compose.yml). Adjust the host path and `MC_DOMAIN` first.
 
-**Update**: *Apps → multiclaude → ⋮ → Pull Image*. The database migrates itself, and **runners update themselves** to the server's version when idle. Details and rollback: [deploy/TRUENAS.md](deploy/TRUENAS.md#7-updating).
+**Update**: *Apps → multiclaude → ⋮ → Pull Image*. The database migrates itself, agents keep working through the short downtime, and **runners update themselves** to the server's version once their running sessions are done. Details and rollback: [deploy/TRUENAS.md](deploy/TRUENAS.md#7-updating).
 
 Open `http://<nas>:8090` (LAN) or `https://<your domain>`. The first start prints a generated `admin` password in the app logs. **[deploy/TRUENAS.md](deploy/TRUENAS.md)** walks through the whole internet-facing setup: domain, port forwarding, certificates, users, machines.
 

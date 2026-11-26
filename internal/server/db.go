@@ -132,7 +132,7 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	// A single connection serialises writes and makes claim transactions trivially atomic.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema + authSchema + repoSchema + questionSchema); err != nil {
+	if _, err := db.Exec(schema + authSchema + repoSchema + questionSchema + agentCallSchema); err != nil {
 		return nil, err
 	}
 	// Additive migrations for databases created by older versions.
@@ -141,6 +141,8 @@ func openDB(path string) (*sql.DB, error) {
 		`ALTER TABLE nodes ADD COLUMN token_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN gpus TEXT NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE nodes ADD COLUMN claude_account TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN pending_replies INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE questions ADD COLUMN call_id TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return nil, fmt.Errorf("migration %q: %w", m, err)
@@ -259,7 +261,8 @@ type Node struct {
 	ClaudeVersion string          `json:"claude_version"`
 	ClaudeAuth    string          `json:"claude_auth"`
 	ClaudeAccount string          `json:"claude_account"`
-	Load          *proto.Load     `json:"load,omitempty"` // live, in-memory
+	Load          *proto.Load     `json:"load,omitempty"`        // live, in-memory
+	UpdatingTo    string          `json:"updating_to,omitempty"` // runner waits for its sessions to end, then updates
 	RunnerVersion string          `json:"runner_version"`
 	Model         string          `json:"model"`
 	LastSeen      int64           `json:"last_seen"`

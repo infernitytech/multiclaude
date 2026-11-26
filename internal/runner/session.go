@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -76,18 +77,24 @@ func (s *session) info(format string, a ...any) {
 func (s *session) shipEvents(done <-chan struct{}) {
 	t := time.NewTicker(400 * time.Millisecond)
 	defer t.Stop()
+	// Events are kept while the server is unreachable (e.g. being updated) and
+	// sent once it is back, so the live log and chat replies survive restarts.
+	const keep = 20000
 	var buf []proto.RunEvent
-	flush := func() {
+	flush := func() bool {
 		if len(buf) == 0 {
-			return
+			return true
 		}
-		for i := 0; i < 5; i++ {
-			if err := s.r.post("/api/runner/runs/"+s.a.RunID+"/events", buf, nil); err == nil {
-				break
+		err := s.r.post("/api/runner/runs/"+s.a.RunID+"/events", buf, nil)
+		var he *httpError
+		if err != nil && !(errors.As(err, &he) && he.code >= 400 && he.code < 500 && he.code != 408 && he.code != 429) {
+			if len(buf) > keep { // drop the oldest rather than growing without bound
+				buf = append(buf[:0], buf[len(buf)-keep:]...)
 			}
-			time.Sleep(time.Second)
+			return false
 		}
 		buf = buf[:0]
+		return true
 	}
 	for {
 		select {
@@ -104,7 +111,12 @@ func (s *session) shipEvents(done <-chan struct{}) {
 				case e := <-s.events:
 					buf = append(buf, e)
 				default:
-					flush()
+					// The finish report waits for this, so give an updating server time to come back.
+					wait, deadline := time.Second, time.Now().Add(30*time.Minute)
+					for !flush() && time.Now().Before(deadline) {
+						time.Sleep(wait)
+						wait = min(wait*2, 30*time.Second)
+					}
 					return
 				}
 			}
@@ -276,8 +288,17 @@ func (s *session) finalizeRepo(rp wsRepo, salvage bool) (bool, string) {
 		return false, head
 	}
 	push := func() error {
-		_, err := g("push", "origin", "HEAD:refs/heads/"+rp.branch)
-		return err
+		// Wait out a server restart/update instead of losing the push.
+		wait, deadline := 2*time.Second, time.Now().Add(30*time.Minute)
+		for {
+			out, err := g("push", "origin", "HEAD:refs/heads/"+rp.branch)
+			if err == nil || !transientGit(out+" "+err.Error()) || time.Now().After(deadline) {
+				return err
+			}
+			s.info("%s: server unreachable, retrying the push in %s", label, wait)
+			time.Sleep(wait)
+			wait = min(wait*2, 30*time.Second)
+		}
 	}
 	if err := push(); err != nil {
 		s.info("%s: push rejected, integrating remote changes: %v", label, err)
@@ -561,4 +582,17 @@ func (l *limitedBuf) Write(p []byte) (int, error) {
 		l.buf.Write(p)
 	}
 	return len(p), nil
+}
+
+// transientGit recognises git failures caused by the server being unreachable.
+func transientGit(out string) bool {
+	o := strings.ToLower(out)
+	for _, k := range []string{"could not resolve host", "failed to connect", "connection refused", "connection reset",
+		"couldn't connect", "timed out", "empty reply from server", "the requested url returned error: 502",
+		"the requested url returned error: 503", "the requested url returned error: 504", "unexpected disconnect", "remote end hung up"} {
+		if strings.Contains(o, k) {
+			return true
+		}
+	}
+	return false
 }
