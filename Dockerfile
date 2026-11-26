@@ -1,12 +1,15 @@
 # MultiClaude server image (includes runner binaries for download by machines).
-FROM golang:1.26-alpine AS build
+# The build stage runs natively and cross-compiles (pure Go), so multi-arch builds need no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
+ARG TARGETOS=linux
+ARG TARGETARCH
 ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags="-s -w -X multiclaude/internal/proto.Version=${VERSION}" -o /out/multiclaude-server ./cmd/multiclaude-server
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X multiclaude/internal/proto.Version=${VERSION}" -o /out/multiclaude-server ./cmd/multiclaude-server
 RUN set -e; for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
       GOOS=${t%/*} GOARCH=${t#*/} go build -trimpath -ldflags="-s -w -X multiclaude/internal/proto.Version=${VERSION}" \
         -o /out/dl/multiclaude-runner-${t%/*}-${t#*/} ./cmd/multiclaude-runner; \
